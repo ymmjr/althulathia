@@ -1041,6 +1041,8 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/archive": return self._page("archive.html", {"__VERSION__":VERSION})
         if path=="/brand.svg":
             body=(WEB/"brand.svg").read_bytes(); return self._send(200,body,"image/svg+xml; charset=utf-8")
+        if path=="/brand.webp":
+            body=(WEB/"brand.webp").read_bytes(); return self._send(200,body,"image/webp")
         if path=="/team": return self._page("team.html", {"__VERSION__":VERSION})
         if path=="/room-admin": return self._page("admin_room.html", {"__VERSION__":VERSION})
         if path=="/display": return self._page("display.html", {"__VERSION__":VERSION})
