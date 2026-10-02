@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.43"
+VERSION = "Vault Web v0.44"
 
 
 
@@ -1145,7 +1145,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(password)<8: return self._json(400,{"ok":False,"message":"كلمة المرور يجب أن تكون 8 أحرف على الأقل."})
             existing=MANAGER.storage.get_admin_user_by_email(email)
             if existing:
-                if email_auth.enabled() and existing.get("status")=="email_unverified":
+                if email_auth.enabled() and existing.get("status") in {"email_unverified","pending"} and not email_auth.is_verified(MANAGER.storage,existing):
                     return self._json(409,{"ok":False,"message":"هذا البريد مسجل ولم يتم تأكيده بعد. أدخل رمز التحقق أو اطلب رمزًا جديدًا.","requires_verification":True,"email":email})
                 return self._json(409,{"ok":False,"message":"هذا البريد مسجل مسبقًا."})
             if email_auth.enabled() and not email_auth.configured():
