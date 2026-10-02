@@ -17,6 +17,50 @@ jobs:
           node-version: '22'
       - name: Compile Python
         run: python -m py_compile server.py email_auth.py
+      - name: Smoke test Festival Rounds
+        env:
+          VAULT_DB_PATH: /tmp/v050-smoke.db
+          VAULT_LOG_DIR: /tmp/v050-logs
+          EMAIL_AUTH_ENABLED: "0"
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          db = Path(os.environ["VAULT_DB_PATH"])
+          if db.exists():
+              db.unlink()
+          import server
+          try:
+              storage = server.MANAGER.storage
+              super_user = storage.create_admin_user("super-test@example.com", "Super Test", server.hash_password("password123"), role="super_admin", status="approved")
+              assistant = storage.create_admin_user("assistant-test@example.com", "Assistant Test", server.hash_password("password123"), role="assistant_admin", status="approved")
+              supervisor = storage.create_admin_user("supervisor-test@example.com", "Supervisor Test", server.hash_password("password123"), role="supervisor", status="approved")
+              questions = [{"number": i, "question": f"سؤال {i}", "correct_answer": f"جواب {i}", "difficulty": 1} for i in range(1, 13)]
+              pack = storage.upsert_question_pack("round_01", "الجولة 1", questions, "round1.json", super_user["id"])
+              private_a = server.MANAGER.create_room("خاصة أ", owner_user_id=assistant["id"], owner_name=assistant["name"], owner_email=assistant["email"], room_type="private", question_pack=pack)
+              private_b = server.MANAGER.create_room("خاصة ب", owner_user_id=super_user["id"], owner_name=super_user["name"], owner_email=super_user["email"], room_type="private", question_pack=pack)
+              normal = server.MANAGER.create_room("عادية", owner_user_id=assistant["id"], owner_name=assistant["name"], owner_email=assistant["email"], room_type="normal")
+              assert server.MANAGER.can_access(super_user, private_a)
+              assert server.MANAGER.can_access(assistant, private_a)
+              assert server.MANAGER.can_access(assistant, private_b)
+              assert not server.MANAGER.can_access(supervisor, private_a)
+              assert server.MANAGER.can_access(assistant, normal)
+              assert not server.MANAGER.can_access(supervisor, normal)
+              before = [q["question"] for q in private_a.questions]
+              assert before == [q["question"] for q in private_b.questions]
+              private_a.reset_round()
+              assert [q["question"] for q in private_a.questions] == before
+              changed = storage.set_admin_user_role(supervisor["id"], "assistant_admin")
+              assert changed["role"] == "assistant_admin"
+              assert server.MANAGER.can_access(changed, private_a)
+              pack2 = storage.upsert_question_pack("round_01", "الجولة 1", [{"number": i, "question": f"نسخة ثانية {i}", "correct_answer": f"جواب {i}", "difficulty": 1} for i in range(1, 13)], "round1-v2.json", super_user["id"])
+              assert pack2["version"] == 2
+              assert [q["question"] for q in private_a.questions] == before
+              assert private_a.code not in {r["code"] for r in server.MANAGER.list_rooms(supervisor)}
+              print("Festival Rounds smoke test passed")
+          finally:
+              server.MANAGER.shutdown()
+          PY
       - name: Check JavaScript in web pages
         run: |
           python - <<'PY'

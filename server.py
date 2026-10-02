@@ -27,12 +27,18 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.45"
+VERSION = "Vault Web v0.50"
 
 
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+FESTIVAL_PACK_SLOTS = (
+    [{"id": f"round_{i:02d}", "label": f"الجولة {i}"} for i in range(1, 13)]
+    + [{"id": f"reserve_{i}", "label": f"احتياط {i}"} for i in range(1, 4)]
+)
+FESTIVAL_PACK_LABELS = {x["id"]: x["label"] for x in FESTIVAL_PACK_SLOTS}
+ADMIN_ROLES = {"super_admin", "assistant_admin", "supervisor"}
 
 def normalize_email(value: str) -> str:
     return str(value or "").strip().lower()[:254]
@@ -96,6 +102,7 @@ class Storage:
                     cur.execute("CREATE TABLE IF NOT EXISTS admin_users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, approved_at TEXT, approved_by TEXT, last_login_at TEXT)")
                     cur.execute("CREATE TABLE IF NOT EXISTS admin_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at BIGINT NOT NULL)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id)")
+                    cur.execute("CREATE TABLE IF NOT EXISTS question_packs (slot_id TEXT PRIMARY KEY, label TEXT NOT NULL, version INTEGER NOT NULL, questions_json TEXT NOT NULL, source_name TEXT, uploaded_at TEXT NOT NULL, uploaded_by TEXT NOT NULL, checksum TEXT NOT NULL)")
                     if self.kind == "sqlite": con.commit()
                 self.last_error = ""
             except Exception as e:
@@ -215,6 +222,69 @@ class Storage:
                     else: cur.execute("UPDATE admin_users SET status=?, approved_at=?, approved_by=? WHERE id=?", (status,now,approved_by,user_id))
                     con.commit()
         return self.get_admin_user_by_id(user_id)
+
+    def set_admin_user_role(self, user_id: str, role: str) -> dict | None:
+        if role not in {"assistant_admin", "supervisor"}:
+            raise ValueError("Invalid admin role")
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                if self.kind == "postgres":
+                    cur.execute("UPDATE admin_users SET role=%s WHERE id=%s", (role, user_id))
+                else:
+                    cur.execute("UPDATE admin_users SET role=? WHERE id=?", (role, user_id))
+                    con.commit()
+        return self.get_admin_user_by_id(user_id)
+
+    def list_question_packs(self) -> list[dict]:
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                cur.execute("SELECT slot_id,label,version,source_name,uploaded_at,uploaded_by,checksum FROM question_packs")
+                rows = cur.fetchall()
+        keys = ("slot_id","label","version","source_name","uploaded_at","uploaded_by","checksum")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def get_question_pack(self, slot_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT slot_id,label,version,questions_json,source_name,uploaded_at,uploaded_by,checksum FROM question_packs WHERE slot_id=%s",
+            "SELECT slot_id,label,version,questions_json,source_name,uploaded_at,uploaded_by,checksum FROM question_packs WHERE slot_id=?",
+            (str(slot_id),),
+        )
+        if not row:
+            return None
+        keys = ("slot_id","label","version","questions_json","source_name","uploaded_at","uploaded_by","checksum")
+        data = dict(zip(keys, row))
+        data["questions"] = json.loads(data.pop("questions_json"))
+        return data
+
+    def upsert_question_pack(self, slot_id: str, label: str, questions: list[dict], source_name: str, uploaded_by: str) -> dict:
+        payload = json.dumps(questions, ensure_ascii=False, separators=(",", ":"))
+        checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                if self.kind == "postgres":
+                    cur.execute("SELECT version FROM question_packs WHERE slot_id=%s", (slot_id,))
+                else:
+                    cur.execute("SELECT version FROM question_packs WHERE slot_id=?", (slot_id,))
+                row = cur.fetchone()
+                version = (int(row[0]) + 1) if row else 1
+                if self.kind == "postgres":
+                    cur.execute(
+                        "INSERT INTO question_packs(slot_id,label,version,questions_json,source_name,uploaded_at,uploaded_by,checksum) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                        "ON CONFLICT(slot_id) DO UPDATE SET label=EXCLUDED.label,version=EXCLUDED.version,questions_json=EXCLUDED.questions_json,source_name=EXCLUDED.source_name,uploaded_at=EXCLUDED.uploaded_at,uploaded_by=EXCLUDED.uploaded_by,checksum=EXCLUDED.checksum",
+                        (slot_id,label,version,payload,source_name,now,uploaded_by,checksum),
+                    )
+                else:
+                    cur.execute(
+                        "INSERT INTO question_packs(slot_id,label,version,questions_json,source_name,uploaded_at,uploaded_by,checksum) VALUES (?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(slot_id) DO UPDATE SET label=excluded.label,version=excluded.version,questions_json=excluded.questions_json,source_name=excluded.source_name,uploaded_at=excluded.uploaded_at,uploaded_by=excluded.uploaded_by,checksum=excluded.checksum",
+                        (slot_id,label,version,payload,source_name,now,uploaded_by,checksum),
+                    )
+                    con.commit()
+        return self.get_question_pack(slot_id)
 
     def touch_admin_login(self, user_id: str) -> None:
         now=datetime.now().isoformat(timespec="seconds")
@@ -398,6 +468,45 @@ def normalize_answer(s: str) -> str:
     return " ".join(str(s).strip().split()).casefold()
 
 
+def normalize_question_pack_payload(payload) -> list[dict]:
+    items = payload.get("questions") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise ValueError("ملف الأسئلة يجب أن يحتوي على قائمة questions.")
+    if len(items) != 12:
+        raise ValueError("ملف الجولة يجب أن يحتوي على 12 سؤالًا بالضبط.")
+    questions = []
+    seen_numbers = set()
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"السؤال {idx} غير صالح.")
+        question = str(item.get("question", "")).strip()
+        correct_answer = str(item.get("correct_answer", item.get("answer", ""))).strip()
+        if not question:
+            raise ValueError(f"نص السؤال {idx} فارغ.")
+        if not correct_answer:
+            raise ValueError(f"الإجابة المرجعية للسؤال {idx} فارغة.")
+        try:
+            number = int(item.get("number", idx))
+        except Exception:
+            number = idx
+        if number in seen_numbers:
+            raise ValueError("أرقام الأسئلة داخل الملف يجب أن تكون فريدة.")
+        seen_numbers.add(number)
+        try:
+            difficulty = int(item.get("difficulty", 1) or 1)
+        except Exception:
+            difficulty = 1
+        if difficulty not in {1, 2, 3}:
+            raise ValueError(f"صعوبة السؤال {idx} يجب أن تكون 1 أو 2 أو 3.")
+        questions.append({
+            "number": number,
+            "question": question[:1000],
+            "correct_answer": correct_answer[:1000],
+            "difficulty": difficulty,
+        })
+    return questions
+
+
 class GameRoom:
     LOG_HEADER = ["الوقت", "رقم الحدث", "رمز الغرفة", "رقم السؤال", "الفريق", "الحدث", "القيمة", "الخزنة قبل", "الخزنة بعد", "المعرض للخطر قبل", "المعرض للخطر بعد", "قيمة السؤال قبل", "قيمة السؤال بعد", "الإجابة", "التصحيح", "القرار", "ملاحظة"]
     EVENT_AR = {
@@ -407,7 +516,7 @@ class GameRoom:
         "QUESTION_RESOLVED":"اعتماد نتيجة السؤال", "MANUAL_ADD":"إضافة يدوية للخزنة", "MANUAL_DEDUCT":"خصم يدوي من الخزنة", "ROUND_RESET":"إعادة تهيئة الجولة", "GAME_FINISHED":"انتهاء الفقرة", "ROOM_CLOSED":"إغلاق الغرفة", "ROOM_REOPENED":"إعادة فتح الغرفة"
     }
 
-    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None, owner_user_id: str = "", owner_name: str = "", owner_email: str = ""):
+    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None, owner_user_id: str = "", owner_name: str = "", owner_email: str = "", room_type: str = "normal", question_pack_id: str = "", question_pack_label: str = "", question_pack_version: int = 0):
         self.cfg = dict(config)
         self.base_questions = [dict(q) for q in questions]
         self.storage = storage
@@ -418,6 +527,10 @@ class GameRoom:
         self.owner_user_id = str(owner_user_id or "")
         self.owner_name = str(owner_name or "")[:120]
         self.owner_email = normalize_email(owner_email)
+        self.room_type = "private" if room_type == "private" else "normal"
+        self.question_pack_id = str(question_pack_id or "")
+        self.question_pack_label = str(question_pack_label or "")[:120]
+        self.question_pack_version = int(question_pack_version or 0)
         self.archived_at = None
         self.closed_at = None
         self.closed_joins_open = False
@@ -452,12 +565,18 @@ class GameRoom:
         self.owner_user_id = str(d.get("owner_user_id") or self.owner_user_id or "")
         self.owner_name = str(d.get("owner_name") or self.owner_name or "")[:120]
         self.owner_email = normalize_email(d.get("owner_email") or self.owner_email or "")
+        self.room_type = "private" if d.get("room_type") == "private" else "normal"
+        self.question_pack_id = str(d.get("question_pack_id") or self.question_pack_id or "")
+        self.question_pack_label = str(d.get("question_pack_label") or self.question_pack_label or "")[:120]
+        self.question_pack_version = int(d.get("question_pack_version", self.question_pack_version) or 0)
         self.archived_at = d.get("archived_at")
         self.closed_at = d.get("closed_at")
         self.closed_joins_open = bool(d.get("closed_joins_open", False))
         self.paused_question_remaining_ms = int(d.get("paused_question_remaining_ms", 0) or 0)
         self.paused_storage_remaining_ms = int(d.get("paused_storage_remaining_ms", 0) or 0)
         self.questions = [dict(q) for q in d.get("questions", self.base_questions)]
+        if self.room_type == "private":
+            self.base_questions = [dict(q) for q in self.questions]
         self.phase = str(d.get("phase", "lobby"))
         self.game_started = bool(d.get("game_started", False))
         self.joins_open = bool(d.get("joins_open", True))
@@ -473,7 +592,7 @@ class GameRoom:
 
     def snapshot(self) -> dict:
         return {
-            "schema": 3, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at, "owner_user_id": self.owner_user_id, "owner_name": self.owner_name, "owner_email": self.owner_email, "archived_at": self.archived_at, "closed_at": self.closed_at,
+            "schema": 4, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at, "owner_user_id": self.owner_user_id, "owner_name": self.owner_name, "owner_email": self.owner_email, "room_type": self.room_type, "question_pack_id": self.question_pack_id, "question_pack_label": self.question_pack_label, "question_pack_version": self.question_pack_version, "archived_at": self.archived_at, "closed_at": self.closed_at,
             "closed_joins_open": self.closed_joins_open, "paused_question_remaining_ms": self.paused_question_remaining_ms, "paused_storage_remaining_ms": self.paused_storage_remaining_ms,
             "questions": self.questions, "phase": self.phase, "game_started": self.game_started, "joins_open": self.joins_open, "index": self.index,
             "question_deadline_ms": self.question_deadline_ms, "storage_deadline_ms": self.storage_deadline_ms, "question_token": self.question_token,
@@ -516,7 +635,7 @@ class GameRoom:
         return int(time.time() * 1000)
 
     def _init_round(self, clear_scores: bool) -> None:
-        self.questions = randomized_question_order(self.base_questions)
+        self.questions = [dict(q) for q in self.base_questions] if self.room_type == "private" else randomized_question_order(self.base_questions)
         self.phase = "lobby"
         self.game_started = False
         self.joins_open = True
@@ -909,7 +1028,7 @@ class GameRoom:
                     bucket[key]["team_ids"].append(t["id"]); bucket[key]["team_names"].append(t["name"])
                 groups = sorted(bucket.values(), key=lambda g: (-len(g["team_ids"]), g["answer"]))
             return {
-                "room_code":self.code, "room_name":self.name, "created_at":self.created_at, "archived_at":self.archived_at, "closed_at":self.closed_at, "room_closed":bool(self.closed_at), "owner_user_id":self.owner_user_id, "owner_name":self.owner_name, "owner_email":self.owner_email, "phase":self.phase, "phase_ar":self.phase_ar(), "joins_open":self.joins_open, "game_started":self.game_started,
+                "room_code":self.code, "room_name":self.name, "created_at":self.created_at, "archived_at":self.archived_at, "closed_at":self.closed_at, "room_closed":bool(self.closed_at), "owner_user_id":self.owner_user_id, "owner_name":self.owner_name, "owner_email":self.owner_email, "room_type":self.room_type, "question_pack_id":self.question_pack_id, "question_pack_label":self.question_pack_label, "question_pack_version":self.question_pack_version, "phase":self.phase, "phase_ar":self.phase_ar(), "joins_open":self.joins_open, "game_started":self.game_started,
                 "server_now_ms":now, "question_deadline_ms":self.question_deadline_ms, "storage_deadline_ms":self.storage_deadline_ms, "correction_ready_ms":self.correction_ready_ms,
                 "question_no":self.index+1 if self.index>=0 else 0, "total_questions":len(self.questions), "question_token":self.question_token,
                 "question":q["question"] if q else "", "correct_answer":q["correct_answer"] if q else "", "difficulty":q["difficulty"] if q else 0,
@@ -998,9 +1117,21 @@ class RoomManager:
                 code = "".join(secrets.choice(self.ALPHABET) for _ in range(4))
                 if code not in self.rooms: return code
             raise RuntimeError("Unable to generate room code")
-    def create_room(self, name: str, owner_user_id: str = "", owner_name: str = "", owner_email: str = ""):
+    def create_room(self, name: str, owner_user_id: str = "", owner_name: str = "", owner_email: str = "", room_type: str = "normal", question_pack: dict | None = None):
         with self.lock:
-            code = self.new_code(); room = GameRoom(self.cfg, self.questions, code, name, self.storage, owner_user_id=owner_user_id, owner_name=owner_name, owner_email=owner_email); self.rooms[code] = room
+            room_type = "private" if room_type == "private" else "normal"
+            pack = question_pack or {}
+            room_questions = [dict(q) for q in pack.get("questions", self.questions)] if room_type == "private" else self.questions
+            code = self.new_code()
+            room = GameRoom(
+                self.cfg, room_questions, code, name, self.storage,
+                owner_user_id=owner_user_id, owner_name=owner_name, owner_email=owner_email,
+                room_type=room_type,
+                question_pack_id=str(pack.get("slot_id", "")) if room_type == "private" else "",
+                question_pack_label=str(pack.get("label", "")) if room_type == "private" else "",
+                question_pack_version=int(pack.get("version", 0) or 0) if room_type == "private" else 0,
+            )
+            self.rooms[code] = room
             with room.lock:
                 room._changed(team=True, admin=True, display=True)
             return room
@@ -1015,8 +1146,12 @@ class RoomManager:
                     r.owner_user_id=str(owner_user_id); r._persist(); claimed+=1
         return claimed
     def can_access(self, user: dict | None, room: GameRoom | None) -> bool:
-        if not user or not room or user.get("status") != "approved": return False
-        return user.get("role") == "super_admin" or (room.owner_user_id and room.owner_user_id == user.get("id"))
+        if not user or not room or user.get("status") != "approved":
+            return False
+        role = user.get("role")
+        if room.room_type == "private":
+            return role in {"super_admin", "assistant_admin"}
+        return role == "super_admin" or (room.owner_user_id and room.owner_user_id == user.get("id"))
     def preserve_owner_identity(self, user: dict) -> int:
         changed = 0
         user_id = str(user.get("id") or "")
@@ -1037,7 +1172,7 @@ class RoomManager:
             rooms=sorted(self.rooms.values(), key=lambda x:x.created_at, reverse=True)
         if user:
             rooms=[r for r in rooms if self.can_access(user,r)]
-        return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"archived_at":r.archived_at,"closed_at":r.closed_at,"is_closed":bool(r.closed_at),"is_archived":bool(r.closed_at or r.archived_at or r.phase=="finished"),"owner_user_id":r.owner_user_id,"owner_name":r.owner_name,"owner_email":r.owner_email,"leaderboard":r.leaderboard(10)} for r in rooms]
+        return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"archived_at":r.archived_at,"closed_at":r.closed_at,"is_closed":bool(r.closed_at),"is_archived":bool(r.closed_at or r.archived_at or r.phase=="finished"),"owner_user_id":r.owner_user_id,"owner_name":r.owner_name,"owner_email":r.owner_email,"room_type":r.room_type,"is_private":r.room_type=="private","question_pack_id":r.question_pack_id,"question_pack_label":r.question_pack_label,"question_pack_version":r.question_pack_version,"leaderboard":r.leaderboard(10)} for r in rooms]
 
 
 CONFIG, QUESTIONS = load_data()
@@ -1046,7 +1181,7 @@ MANAGER = RoomManager(CONFIG, QUESTIONS)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.45"
+    server_version = "VaultWeb/0.50"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1169,6 +1304,20 @@ class Handler(BaseHTTPRequestHandler):
                 x["email_verified"]=email_auth.is_verified(MANAGER.storage,x)
             pending=sum(1 for x in users if x.get("status")=="pending" and x.get("email_verified"))
             return self._json(200,{"ok":True,"users":users,"pending_count":pending})
+        if path=="/api/admin/question-packs":
+            user=self._require_user()
+            if not user or user.get("role") not in {"super_admin","assistant_admin"}:
+                return self._json(403,{"ok":False,"message":"ملفات جولات المهرجان غير متاحة لهذه الصلاحية."})
+            records={x["slot_id"]:x for x in MANAGER.storage.list_question_packs()}
+            slots=[]
+            for spec in FESTIVAL_PACK_SLOTS:
+                row=records.get(spec["id"])
+                item={"id":spec["id"],"label":spec["label"],"ready":bool(row),"version":int(row["version"]) if row else 0,"source_name":row.get("source_name","") if row else "","uploaded_at":row.get("uploaded_at") if row else None}
+                if user.get("role")=="super_admin":
+                    item["uploaded_by"]=row.get("uploaded_by") if row else None
+                    item["checksum"]=row.get("checksum") if row else None
+                slots.append(item)
+            return self._json(200,{"ok":True,"slots":slots})
         if path=="/api/team/stream":
             room,_=self._room_from(u); team=self._team_auth(room,u)
             if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
@@ -1320,16 +1469,27 @@ class Handler(BaseHTTPRequestHandler):
                 MANAGER.preserve_owner_identity(target)
                 deleted=MANAGER.storage.delete_admin_user(target_id)
                 return self._json(200 if deleted else 404,{"ok":bool(deleted),"message":"تم حذف الحساب مع الاحتفاظ بسجل الغرف السابقة." if deleted else "الحساب غير موجود."})
+            if path=="/api/admin/users/set-role":
+                if target.get("status")!="approved":
+                    return self._json(409,{"ok":False,"message":"يجب اعتماد الحساب أولًا قبل تغيير صلاحيته."})
+                role=str(p.get("role",""))
+                if role not in {"assistant_admin","supervisor"}:
+                    return self._json(400,{"ok":False,"message":"الصلاحية المطلوبة غير صحيحة."})
+                updated=MANAGER.storage.set_admin_user_role(target_id,role)
+                return self._json(200,{"ok":True,"message":"تم تحديث صلاحية الحساب.","user":public_user(updated)})
             if path=="/api/admin/users/approve":
                 if email_auth.enabled() and not email_auth.is_verified(MANAGER.storage,target):
                     return self._json(409,{"ok":False,"message":"لا يمكن اعتماد الحساب قبل تأكيد البريد الإلكتروني."})
-                updated=MANAGER.storage.set_admin_user_status(target_id,"approved",approved_by=admin["id"],role="supervisor")
+                role=target.get("role") if target.get("role") in {"assistant_admin","supervisor"} else "supervisor"
+                updated=MANAGER.storage.set_admin_user_status(target_id,"approved",approved_by=admin["id"],role=role)
                 if email_auth.enabled() and email_auth.configured():
                     threading.Thread(target=lambda u=updated: email_auth.send_approval_email(u),daemon=True).start()
             elif path=="/api/admin/users/reject":
-                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"rejected",approved_by=admin["id"],role="supervisor")
+                role=target.get("role") if target.get("role") in {"assistant_admin","supervisor"} else "supervisor"
+                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"rejected",approved_by=admin["id"],role=role)
             elif path=="/api/admin/users/disable":
-                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"disabled",approved_by=admin["id"],role="supervisor")
+                role=target.get("role") if target.get("role") in {"assistant_admin","supervisor"} else "supervisor"
+                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"disabled",approved_by=admin["id"],role=role)
             else: return self._send(404,b"Not found")
             return self._json(200,{"ok":True,"user":public_user(updated)})
         if path=="/api/join":
@@ -1339,11 +1499,44 @@ class Handler(BaseHTTPRequestHandler):
             data={"ok":ok,"message":msg}
             if ok and team: data.update({"room_code":room.code,"room_name":room.name,"team_id":team["id"],"team_name":team["name"],"team_token":team["token"],"team_url":f"/team?code={room.code}&token={team['token']}"})
             return self._json(200 if ok else 409,data)
+        if path=="/api/admin/question-packs/upload":
+            user=self._require_superadmin()
+            if not user:
+                return self._json(403,{"ok":False,"message":"رفع واستبدال ملفات الأسئلة للمسؤول الرئيسي فقط."})
+            slot_id=str(p.get("slot_id","")).strip()
+            if slot_id not in FESTIVAL_PACK_LABELS:
+                return self._json(400,{"ok":False,"message":"خانة الجولة غير صحيحة."})
+            try:
+                questions=normalize_question_pack_payload(p.get("payload"))
+                source_name=str(p.get("source_name","questions.json")).strip()[:160]
+                pack=MANAGER.storage.upsert_question_pack(slot_id,FESTIVAL_PACK_LABELS[slot_id],questions,source_name,user["id"])
+                return self._json(200,{"ok":True,"message":f"تم حفظ {FESTIVAL_PACK_LABELS[slot_id]} — الإصدار {pack['version']}.","slot":{"id":slot_id,"label":pack["label"],"version":pack["version"],"source_name":pack.get("source_name",""),"uploaded_at":pack.get("uploaded_at")}})
+            except ValueError as e:
+                return self._json(400,{"ok":False,"message":str(e)})
+            except Exception as e:
+                print(f"[PACK] upload failed for {slot_id}: {e}")
+                return self._json(500,{"ok":False,"message":"تعذر حفظ ملف الأسئلة."})
         if path=="/api/admin/create_room":
             user=self._require_user()
-            if not user or user.get("role") not in {"super_admin","supervisor"}: return self._json(403,{"ok":False,"message":"لا تملك صلاحية إنشاء غرفة."})
-            room=MANAGER.create_room(str(p.get("room_name","")).strip() or "غرفة الخزنة", owner_user_id=user["id"], owner_name=user.get("name",""), owner_email=user.get("email",""))
-            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة.","room":{"code":room.code,"name":room.name,"admin_url":f"/room-admin?code={room.code}","display_url":f"/display?code={room.code}"}})
+            if not user or user.get("role") not in {"super_admin","assistant_admin","supervisor"}:
+                return self._json(403,{"ok":False,"message":"لا تملك صلاحية إنشاء غرفة."})
+            room_type="private" if str(p.get("room_type","normal"))=="private" else "normal"
+            pack=None
+            if room_type=="private":
+                if user.get("role") not in {"super_admin","assistant_admin"}:
+                    return self._json(403,{"ok":False,"message":"إنشاء غرف المهرجان الخاصة متاح للمسؤول الرئيسي والمسؤول المساعد فقط."})
+                pack_id=str(p.get("question_pack_id","")).strip()
+                if pack_id not in FESTIVAL_PACK_LABELS:
+                    return self._json(400,{"ok":False,"message":"اختر ملف جولة صحيحًا."})
+                pack=MANAGER.storage.get_question_pack(pack_id)
+                if not pack:
+                    return self._json(409,{"ok":False,"message":"ملف هذه الجولة لم يتم رفعه بعد."})
+            room=MANAGER.create_room(
+                str(p.get("room_name","")).strip() or ("غرفة مهرجان خاصة" if room_type=="private" else "غرفة الخزنة"),
+                owner_user_id=user["id"], owner_name=user.get("name",""), owner_email=user.get("email",""),
+                room_type=room_type, question_pack=pack,
+            )
+            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة الخاصة وتثبيت نسخة ملف الجولة." if room_type=="private" else "تم إنشاء الغرفة.","room":{"code":room.code,"name":room.name,"room_type":room.room_type,"question_pack_label":room.question_pack_label,"question_pack_version":room.question_pack_version,"admin_url":f"/room-admin?code={room.code}","display_url":f"/display?code={room.code}"}})
         if path=="/api/admin/check_pin":
             ok=(not MANAGER.storage.superadmin_exists()) and self._master_pin_ok(p,u); return self._json(200 if ok else 403,{"ok":ok,"message":"الرمز صالح للتهيئة الأولى." if ok else "الرمز غير صالح أو تم إنشاء المسؤول الرئيسي مسبقًا."})
 
