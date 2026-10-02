@@ -1,4 +1,4 @@
-name: Validate v0.41
+name: Validate Vault Web
 
 on:
   pull_request:
@@ -17,12 +17,32 @@ jobs:
           node-version: '22'
       - name: Compile Python
         run: python -m py_compile server.py email_auth.py
-      - name: Check admin JavaScript
+      - name: Check JavaScript in web pages
         run: |
           python - <<'PY'
           from pathlib import Path
-          text = Path('web/admin_home.html').read_text(encoding='utf-8')
-          script = text.rsplit('<script>', 1)[1].split('</script>', 1)[0]
-          Path('/tmp/admin_home.js').write_text(script, encoding='utf-8')
+          out = Path('/tmp/vault-js')
+          out.mkdir(exist_ok=True)
+          count = 0
+          for page in Path('web').glob('*.html'):
+              text = page.read_text(encoding='utf-8')
+              start = 0
+              part = 0
+              while True:
+                  i = text.find('<script>', start)
+                  if i < 0:
+                      break
+                  j = text.find('</script>', i)
+                  if j < 0:
+                      raise SystemExit(f'Unclosed <script> in {page}')
+                  script = text[i + len('<script>'):j]
+                  target = out / f'{page.stem}-{part}.js'
+                  target.write_text(script, encoding='utf-8')
+                  print(target)
+                  count += 1
+                  part += 1
+                  start = j + len('</script>')
+          if not count:
+              raise SystemExit('No scripts found')
           PY
-          node --check /tmp/admin_home.js
+          for file in /tmp/vault-js/*.js; do node --check "$file"; done
