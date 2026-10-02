@@ -953,7 +953,7 @@ def main():
     print(f"Admin:       http://127.0.0.1:{port}/admin")
     print(f"LAN:         http://{ip}:{port}/")
     print(f"Database:    {MANAGER.storage.kind}")
-    print(f"Local admin PIN: {CONFIG['admin_pin']} (غيّره قبل النشر عبر VAULT_ADMIN_PIN)")
+    print("Admin PIN: configured via environment")
     print("="*72)
     try: server.serve_forever(poll_interval=.1)
     except KeyboardInterrupt: pass
