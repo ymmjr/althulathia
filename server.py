@@ -998,3 +998,222 @@ class Handler(BaseHTTPRequestHandler):
     def _cookie_token(self):
         raw=self.headers.get("Cookie", "")
         for part in raw.split(";"):
+            if "=" not in part: continue
+            k,v=part.strip().split("=",1)
+            if k == "vault_session": return v
+        return ""
+    def _current_user(self):
+        return MANAGER.storage.get_user_by_session(self._cookie_token())
+    def _set_session_cookie(self, token: str):
+        secure = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        cookie = f"vault_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}"
+        if secure: cookie += "; Secure"
+        return cookie
+    def _clear_session_cookie(self):
+        secure = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        cookie = "vault_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        if secure: cookie += "; Secure"
+        return cookie
+    def _admin_auth(self, room, u, payload=None):
+        if not room: return False
+        user=self._current_user()
+        if MANAGER.can_access(user, room): return True
+        if not MANAGER.storage.superadmin_exists():
+            payload=payload or {}; qs=parse_qs(u.query); token=str(payload.get("admin_token") or qs.get("token",[""])[0])
+            return bool(token and secrets.compare_digest(room.admin_token, token))
+        return False
+    def _team_auth(self, room, u, payload=None):
+        if not room: return None
+        payload=payload or {}; qs=parse_qs(u.query); token=str(payload.get("team_token") or qs.get("token",[""])[0]); return room.validate_team_token(token)
+    def _master_pin_ok(self, payload=None, u=None):
+        payload=payload or {}; qs=parse_qs(u.query) if u else {}; pin=str(payload.get("pin") or qs.get("pin",[""])[0] or self.headers.get("X-Admin-Pin", "")); return secrets.compare_digest(pin, str(CONFIG["admin_pin"]))
+    def _require_user(self):
+        user=self._current_user()
+        return user if user and user.get("status")=="approved" else None
+    def _require_superadmin(self):
+        user=self._require_user()
+        return user if user and user.get("role")=="super_admin" else None
+
+    def do_GET(self):
+        u=urlparse(self.path); path=u.path
+        if path=="/": return self._page("index.html", {"__VERSION__":VERSION})
+        if path=="/admin": return self._page("admin_home.html", {"__VERSION__":VERSION})
+        if path=="/archive": return self._page("archive.html", {"__VERSION__":VERSION})
+        if path=="/brand.svg":
+            body=(WEB/"brand.svg").read_bytes(); return self._send(200,body,"image/svg+xml; charset=utf-8")
+        if path=="/team": return self._page("team.html", {"__VERSION__":VERSION})
+        if path=="/room-admin": return self._page("admin_room.html", {"__VERSION__":VERSION})
+        if path=="/display": return self._page("display.html", {"__VERSION__":VERSION})
+        if path=="/api/health":
+            db=MANAGER.storage.health(); return self._json(200 if db.get("ok") else 503,{"ok":bool(db.get("ok")),"version":VERSION,"rooms":len(MANAGER.rooms),"database":db,"realtime":"sse","admin_pin_is_default":str(CONFIG["admin_pin"])=="2468"})
+        if path=="/api/auth/status":
+            user=self._current_user(); needs_setup=not MANAGER.storage.superadmin_exists()
+            return self._json(200,{"ok":True,"needs_setup":needs_setup,"logged_in":bool(user),"user":public_user(user)})
+        if path=="/api/admin/users":
+            user=self._require_superadmin()
+            if not user: return self._json(403,{"ok":False,"message":"هذه الصلاحية للمسؤول الرئيسي فقط."})
+            users=MANAGER.storage.list_admin_users(); pending=sum(1 for x in users if x.get("status")=="pending")
+            return self._json(200,{"ok":True,"users":users,"pending_count":pending})
+        if path=="/api/team/stream":
+            room,_=self._room_from(u); team=self._team_auth(room,u)
+            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
+            if not team: return self._json(403,{"ok":False,"message":"جلسة الفريق غير صالحة."})
+            return self._sse(room,"team",lambda:room.team_state(team))
+        if path=="/api/admin/stream":
+            room,_=self._room_from(u)
+            if not self._admin_auth(room,u): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
+            return self._sse(room,"admin",room.admin_state)
+        if path=="/api/display_stream":
+            room,_=self._room_from(u)
+            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
+            return self._sse(room,"display",room.display_state)
+        if path=="/api/room/public":
+            room,_=self._room_from(u)
+            return self._json(200, room.public_summary()) if room else self._json(404,{"ok":False,"message":"رمز الغرفة غير صحيح."})
+        if path=="/api/team/state":
+            room,_=self._room_from(u); team=self._team_auth(room,u)
+            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
+            if not team: return self._json(403,{"ok":False,"message":"جلسة الفريق غير صالحة."})
+            return self._json(200,room.team_state(team))
+        if path=="/api/admin/room_state":
+            room,_=self._room_from(u)
+            if not self._admin_auth(room,u): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
+            return self._json(200,room.admin_state())
+        if path=="/api/display_state":
+            room,_=self._room_from(u)
+            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
+            return self._json(200,room.display_state())
+        if path=="/api/admin/rooms":
+            user=self._require_user()
+            if not user: return self._json(401,{"ok":False,"message":"سجّل الدخول أولًا."})
+            return self._json(200,{"ok":True,"rooms":MANAGER.list_rooms(user),"user":public_user(user)})
+        if path=="/api/admin/archive":
+            user=self._require_user(); room,_=self._room_from(u)
+            if not user: return self._json(401,{"ok":False,"message":"سجّل الدخول أولًا."})
+            if not MANAGER.can_access(user,room): return self._json(403,{"ok":False,"message":"لا تملك صلاحية لهذه الغرفة."})
+            return self._json(200,{"ok":True,"room":room.admin_state(),"log_header":room.LOG_HEADER,"log_rows":room.log_rows[1:]})
+        if path in {"/api/admin/log.xlsx","/api/admin/archive.xlsx"}:
+            room,_=self._room_from(u)
+            if not self._admin_auth(room,u): return self._json(403,{"ok":False,"message":"لا تملك صلاحية لهذه الغرفة."})
+            body=build_event_xlsx(room.log_rows); name=f"Vault_{room.code}_Log_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+            return self._send(200,body,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", {"Content-Disposition":f'attachment; filename="{name}"'})
+        return self._send(404,b"Not found")
+
+    def do_POST(self):
+        u=urlparse(self.path); path=u.path; p=self._read_json()
+        if path=="/api/auth/setup":
+            if MANAGER.storage.superadmin_exists(): return self._json(409,{"ok":False,"message":"تم إنشاء المسؤول الرئيسي مسبقًا."})
+            if not self._master_pin_ok(p,u): return self._json(403,{"ok":False,"message":"رمز الإدارة الحالي غير صحيح."})
+            email=normalize_email(p.get("email","")); name=" ".join(str(p.get("name","")).strip().split())[:120]; password=str(p.get("password", ""))
+            if not EMAIL_RE.match(email): return self._json(400,{"ok":False,"message":"اكتب بريدًا إلكترونيًا صحيحًا."})
+            if len(name)<2: return self._json(400,{"ok":False,"message":"اكتب اسم المسؤول."})
+            if len(password)<8: return self._json(400,{"ok":False,"message":"كلمة المرور يجب أن تكون 8 أحرف على الأقل."})
+            if MANAGER.storage.get_admin_user_by_email(email): return self._json(409,{"ok":False,"message":"هذا البريد مسجل مسبقًا."})
+            try:
+                user=MANAGER.storage.create_admin_user(email,name,hash_password(password),role="super_admin",status="approved")
+                MANAGER.storage.set_admin_user_status(user["id"],"approved",approved_by=user["id"],role="super_admin")
+                claimed=MANAGER.claim_unowned_rooms(user["id"])
+                token=MANAGER.storage.create_admin_session(user["id"]); MANAGER.storage.touch_admin_login(user["id"])
+                return self._json(200,{"ok":True,"message":"تم إنشاء حساب المسؤول الرئيسي.","user":public_user(MANAGER.storage.get_admin_user_by_id(user["id"])),"claimed_rooms":claimed}, {"Set-Cookie":self._set_session_cookie(token)})
+            except sqlite3.IntegrityError:
+                return self._json(409,{"ok":False,"message":"هذا البريد مسجل مسبقًا."})
+            except Exception as e:
+                return self._json(500,{"ok":False,"message":"تعذر إنشاء الحساب."})
+        if path=="/api/auth/signup":
+            if not MANAGER.storage.superadmin_exists(): return self._json(409,{"ok":False,"message":"يجب تهيئة حساب المسؤول الرئيسي أولًا."})
+            email=normalize_email(p.get("email","")); name=" ".join(str(p.get("name","")).strip().split())[:120]; password=str(p.get("password", ""))
+            if not EMAIL_RE.match(email): return self._json(400,{"ok":False,"message":"اكتب بريدًا إلكترونيًا صحيحًا."})
+            if len(name)<2: return self._json(400,{"ok":False,"message":"اكتب اسم المشرف."})
+            if len(password)<8: return self._json(400,{"ok":False,"message":"كلمة المرور يجب أن تكون 8 أحرف على الأقل."})
+            if MANAGER.storage.get_admin_user_by_email(email): return self._json(409,{"ok":False,"message":"هذا البريد مسجل مسبقًا."})
+            try:
+                user=MANAGER.storage.create_admin_user(email,name,hash_password(password),role="supervisor",status="pending")
+                return self._json(200,{"ok":True,"message":"تم إنشاء الحساب وهو بانتظار اعتماد المسؤول الرئيسي.","user":public_user(user)})
+            except Exception:
+                return self._json(500,{"ok":False,"message":"تعذر إنشاء الحساب."})
+        if path=="/api/auth/login":
+            email=normalize_email(p.get("email","")); password=str(p.get("password", "")); user=MANAGER.storage.get_admin_user_by_email(email)
+            if not user or not verify_password(password,user.get("password_hash","")): return self._json(403,{"ok":False,"message":"البريد أو كلمة المرور غير صحيحة."})
+            if user.get("status")=="pending": return self._json(403,{"ok":False,"message":"حسابك بانتظار اعتماد المسؤول الرئيسي."})
+            if user.get("status")!="approved": return self._json(403,{"ok":False,"message":"هذا الحساب غير مفعل."})
+            token=MANAGER.storage.create_admin_session(user["id"]); MANAGER.storage.touch_admin_login(user["id"]); user=MANAGER.storage.get_admin_user_by_id(user["id"])
+            return self._json(200,{"ok":True,"message":"تم تسجيل الدخول.","user":public_user(user)}, {"Set-Cookie":self._set_session_cookie(token)})
+        if path=="/api/auth/logout":
+            MANAGER.storage.delete_admin_session(self._cookie_token())
+            return self._json(200,{"ok":True,"message":"تم تسجيل الخروج."}, {"Set-Cookie":self._clear_session_cookie()})
+        if path.startswith("/api/admin/users/"):
+            admin=self._require_superadmin()
+            if not admin: return self._json(403,{"ok":False,"message":"هذه الصلاحية للمسؤول الرئيسي فقط."})
+            target_id=str(p.get("user_id", "")); target=MANAGER.storage.get_admin_user_by_id(target_id)
+            if not target: return self._json(404,{"ok":False,"message":"الحساب غير موجود."})
+            if target.get("role")=="super_admin" and target.get("id")==admin.get("id"): return self._json(409,{"ok":False,"message":"لا يمكن تغيير حالة حساب المسؤول الرئيسي من هنا."})
+            if path=="/api/admin/users/approve": updated=MANAGER.storage.set_admin_user_status(target_id,"approved",approved_by=admin["id"],role="supervisor")
+            elif path=="/api/admin/users/reject":
+                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"rejected",approved_by=admin["id"],role="supervisor")
+            elif path=="/api/admin/users/disable":
+                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"disabled",approved_by=admin["id"],role="supervisor")
+            else: return self._send(404,b"Not found")
+            return self._json(200,{"ok":True,"user":public_user(updated)})
+        if path=="/api/join":
+            room=MANAGER.get(str(p.get("code","")).strip().upper())
+            if not room: return self._json(404,{"ok":False,"message":"رمز الغرفة غير صحيح."})
+            ok,msg,team=room.join_team(str(p.get("team_name","")), str(p.get("existing_token","")))
+            data={"ok":ok,"message":msg}
+            if ok and team: data.update({"room_code":room.code,"room_name":room.name,"team_id":team["id"],"team_name":team["name"],"team_token":team["token"],"team_url":f"/team?code={room.code}&token={team['token']}"})
+            return self._json(200 if ok else 409,data)
+        if path=="/api/admin/create_room":
+            user=self._require_user()
+            if not user or user.get("role") not in {"super_admin","supervisor"}: return self._json(403,{"ok":False,"message":"لا تملك صلاحية إنشاء غرفة."})
+            room=MANAGER.create_room(str(p.get("room_name","")).strip() or "غرفة الخزنة", owner_user_id=user["id"])
+            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة.","room":{"code":room.code,"name":room.name,"admin_url":f"/room-admin?code={room.code}","display_url":f"/display?code={room.code}"}})
+        if path=="/api/admin/check_pin":
+            ok=(not MANAGER.storage.superadmin_exists()) and self._master_pin_ok(p,u); return self._json(200 if ok else 403,{"ok":ok,"message":"الرمز صالح للتهيئة الأولى." if ok else "الرمز غير صالح أو تم إنشاء المسؤول الرئيسي مسبقًا."})
+
+        room,_=self._room_from(u,p)
+        if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
+
+        if path.startswith("/api/admin/"):
+            if not self._admin_auth(room,u,p): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
+            if path=="/api/admin/toggle_join": ok,msg=room.set_join_open(bool(p.get("open")))
+            elif path=="/api/admin/remove_team": ok,msg=room.remove_team(str(p.get("team_id","")))
+            elif path=="/api/admin/start_game": ok,msg=room.start_game()
+            elif path=="/api/admin/start_next": ok,msg=room.start_next()
+            elif path=="/api/admin/close_question": ok,msg=room.close_question_now()
+            elif path=="/api/admin/correct":
+                corr=p.get("corrections")
+                if not isinstance(corr,dict): return self._json(400,{"ok":False,"message":"بيانات التصحيح غير صحيحة."})
+                ok,msg=room.apply_corrections(corr)
+            elif path=="/api/admin/adjust": ok,msg=room.adjust_vault(str(p.get("team_id","")),str(p.get("mode","")),p.get("amount",0))
+            elif path=="/api/admin/reset_round": ok,msg=room.reset_round()
+            else: return self._send(404,b"Not found")
+            return self._json(200 if ok else 409,{"ok":ok,"message":msg})
+
+        team=self._team_auth(room,u,p)
+        if not team: return self._json(403,{"ok":False,"message":"جلسة الفريق غير صالحة."})
+        if path=="/api/team/draft": ok,msg=room.update_draft(team,p.get("draft",""),p.get("revision",0),p.get("question_token",0))
+        elif path=="/api/team/answer": ok,msg=room.submit_answer(team,str(p.get("answer","")))
+        elif path=="/api/team/storage": ok,msg=room.choose_storage(team)
+        else: return self._send(404,b"Not found")
+        return self._json(200 if ok else 409,{"ok":ok,"message":msg})
+
+
+def local_ip():
+    try:
+        s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect(("8.8.8.8",80)); ip=s.getsockname()[0]; s.close(); return ip
+    except Exception: return "127.0.0.1"
+
+
+def main():
+    port=CONFIG["port"]; ip=local_ip(); server=ThreadingHTTPServer(("0.0.0.0",port),Handler); server.daemon_threads=True
+    print("="*72); print(f"{VERSION} — Persistent DB + SSE realtime")
+    print(f"Participant: http://127.0.0.1:{port}/")
+    print(f"Admin:       http://127.0.0.1:{port}/admin")
+    print(f"LAN:         http://{ip}:{port}/")
+    print(f"Database:    {MANAGER.storage.kind}")
+    print("Admin PIN: configured via environment")
+    print("="*72)
+    try: server.serve_forever(poll_interval=.1)
+    except KeyboardInterrupt: pass
+    finally: MANAGER.shutdown(); server.server_close()
+
+if __name__=="__main__": main()
