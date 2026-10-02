@@ -1,6 +1,6 @@
 # الثلاثية الثقافية — الخزنة
 
-Vault Web v0.40 — preliminary web platform for the cultural committee.
+Vault Web v0.41 — preliminary web platform for the cultural committee.
 
 ## Features
 - Dynamic multi-room Vault game with SSE realtime updates.
@@ -25,3 +25,25 @@ Vault Web v0.40 — preliminary web platform for the cultural committee.
 
 ## Health check
 `/api/health`
+
+## Email authentication
+v0.41 adds optional transactional email flows for supervisor accounts:
+- 6-digit email OTP, valid for 10 minutes.
+- Supervisor approval email after Super Admin approval.
+- Single-use password reset link, valid for 30 minutes.
+- Support email shown in the admin authentication UI.
+
+The feature is gated by `EMAIL_AUTH_ENABLED`. Keep it disabled until the outbound email domain is verified and a Resend API key is configured.
+
+### Email environment variables
+- `EMAIL_AUTH_ENABLED` — set to `1` only after mail setup is complete.
+- `RESEND_API_KEY` — Resend API key; never commit it to Git.
+- `EMAIL_TOKEN_SECRET` — high-entropy server secret used when hashing OTP values.
+- `EMAIL_FROM` — recommended: `الثلاثية الثقافية <no-reply@playalthulathia.com>`.
+- `SUPPORT_EMAIL` — `support@playalthulathia.com`.
+- `APP_BASE_URL` — `https://playalthulathia.com`.
+
+### Account state flow
+`email_unverified -> pending -> approved`
+
+Existing v0.40 accounts are preserved.
