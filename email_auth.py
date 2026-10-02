@@ -37,6 +37,14 @@ def _resend_api_key() -> str:
     return os.environ.get("RESEND_API_KEY", "").strip()
 
 
+def _worker_url() -> str:
+    return os.environ.get("EMAIL_WORKER_URL", "").strip().rstrip("/")
+
+
+def _worker_secret() -> str:
+    return os.environ.get("EMAIL_WORKER_SECRET", "").strip()
+
+
 def _smtp_host() -> str:
     return os.environ.get("SMTP_HOST", "").strip()
 
@@ -67,6 +75,8 @@ def _token_secret() -> str:
 def delivery_provider() -> str:
     if _resend_api_key():
         return "resend"
+    if _worker_url() and _worker_secret():
+        return "worker"
     if _smtp_host() and _smtp_username() and _smtp_password():
         return "smtp"
     return "none"
@@ -184,6 +194,39 @@ def _send_via_resend(to_email: str, subject: str, html_body: str, text_body: str
         raise RuntimeError(f"Resend delivery failed: {exc}") from exc
 
 
+def _send_via_worker(to_email: str, subject: str, html_body: str, text_body: str) -> dict:
+    payload = {
+        "to": to_email,
+        "subject": subject,
+        "html": html_body,
+        "text": text_body,
+    }
+    req = urllib.request.Request(
+        _worker_url() + "/",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer " + _worker_secret(),
+            "Content-Type": "application/json",
+            "User-Agent": "Althulathia-Vault/0.43",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw = response.read().decode("utf-8")
+            data = json.loads(raw or "{}")
+            if not data.get("ok"):
+                raise RuntimeError(f"Worker rejected delivery: {str(data)[:400]}")
+            return {"provider": "worker", **data}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Worker HTTP {exc.code}: {detail[:500]}") from exc
+    except Exception as exc:
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"Worker delivery failed: {exc}") from exc
+
+
 def _send_via_smtp(to_email: str, subject: str, html_body: str, text_body: str) -> dict:
     display_name, sender_email = parseaddr(_email_from())
     if not sender_email:
@@ -220,6 +263,8 @@ def _send_email(to_email: str, subject: str, html_body: str, text_body: str = ""
     provider = delivery_provider()
     if provider == "resend":
         return _send_via_resend(to_email, subject, html_body, text_body)
+    if provider == "worker":
+        return _send_via_worker(to_email, subject, html_body, text_body)
     if provider == "smtp":
         return _send_via_smtp(to_email, subject, html_body, text_body)
     raise RuntimeError("No email provider configured")
