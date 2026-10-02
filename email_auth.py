@@ -270,6 +270,18 @@ def _send_email(to_email: str, subject: str, html_body: str, text_body: str = ""
     raise RuntimeError("No email provider configured")
 
 
+def send_test_email(to_email: str) -> dict:
+    return _send_email(
+        to_email,
+        "اختبار البريد — الثلاثية الثقافية",
+        _shell(
+            "البريد يعمل بنجاح",
+            '<p style="font-size:16px;line-height:1.9">هذه رسالة اختبار من منصة الثلاثية الثقافية للتأكد من جاهزية إرسال OTP ورسائل الحساب.</p>',
+        ),
+        "هذه رسالة اختبار من منصة الثلاثية الثقافية. خدمة البريد تعمل بنجاح.",
+    )
+
+
 def _shell(title: str, inner: str) -> str:
     safe_title = html.escape(title)
     logo = html.escape(app_base_url() + "/brand.webp", quote=True)
