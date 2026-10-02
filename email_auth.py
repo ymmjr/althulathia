@@ -401,7 +401,20 @@ def issue_otp(storage, user: dict, enforce_cooldown: bool = False) -> dict:
                     (user["id"], otp_hash, expires, 0, resend_after),
                 )
                 con.commit()
-    result = send_otp_email(user, code)
+    try:
+        result = send_otp_email(user, code)
+    except Exception:
+        # A failed delivery must not leave the user stuck behind the resend cooldown.
+        # Remove the unsent OTP so the next resend can be attempted immediately.
+        with storage._lock:
+            with storage._connect() as con:
+                cur = con.cursor()
+                if storage.kind == "postgres":
+                    cur.execute("DELETE FROM admin_email_otps WHERE user_id=%s", (user["id"],))
+                else:
+                    cur.execute("DELETE FROM admin_email_otps WHERE user_id=?", (user["id"],))
+                    con.commit()
+        raise
     return {"ok": True, "expires_in": OTP_TTL_SECONDS, "resend_after": OTP_RESEND_SECONDS, "delivery": result}
 
 
