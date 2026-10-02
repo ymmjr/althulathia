@@ -1,0 +1,28 @@
+name: Validate v0.41
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile Python
+        run: python -m py_compile server.py email_auth.py
+      - name: Check admin JavaScript
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('web/admin_home.html').read_text(encoding='utf-8')
+          script = text.rsplit('<script>', 1)[1].split('</script>', 1)[0]
+          Path('/tmp/admin_home.js').write_text(script, encoding='utf-8')
+          PY
+          node --check /tmp/admin_home.js
