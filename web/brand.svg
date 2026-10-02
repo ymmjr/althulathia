@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="260" viewBox="0 0 980 260" role="img" aria-label="الثلاثية الثقافية">
+  <rect width="980" height="260" rx="34" fill="#080B2A"/>
+  <g transform="translate(720 28)">
+    <path d="M104 4 C146 8 185 28 210 61 L156 113 L96 91 Z" fill="#8B5CF6"/>
+    <path d="M210 61 C225 87 230 119 221 151 L155 140 L156 113 Z" fill="#17C9D8"/>
+    <path d="M155 140 L221 151 C205 181 176 202 143 211 L104 157 Z" fill="#334CE0"/>
+    <path d="M104 157 L143 211 C111 218 75 210 48 190 L74 129 Z" fill="#3443D4"/>
+    <path d="M74 129 L48 190 C27 169 13 139 12 107 L72 86 Z" fill="#203CC8"/>
+    <path d="M72 86 L12 107 C17 70 39 38 70 19 L104 4 Z" fill="#7546E5"/>
+    <path d="M104 4 L156 113 L104 157 L72 86 Z" fill="#A66AF2" opacity=".68"/>
+    <path d="M72 86 L104 157 L155 140 L156 113 L104 91 Z" fill="#253FCE" opacity=".75"/>
+  </g>
+  <g transform="translate(72 55)">
+    <text x="0" y="78" fill="#F7F8FF" font-family="Tahoma, Arial, sans-serif" font-size="72" font-weight="800" direction="rtl" unicode-bidi="bidi-override">الثلاثية</text>
+    <rect x="0" y="103" width="345" height="11" rx="5.5" fill="#F4D126"/>
+    <text x="0" y="164" fill="#AEB6DC" font-family="Tahoma, Arial, sans-serif" font-size="45" font-weight="700" direction="rtl" unicode-bidi="bidi-override">الثقافية</text>
+  </g>
+</svg>
