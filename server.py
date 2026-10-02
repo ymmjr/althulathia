@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.44"
+VERSION = "Vault Web v0.45"
 
 
 
@@ -259,6 +259,30 @@ class Storage:
                 if self.kind == "postgres": cur.execute("DELETE FROM admin_sessions WHERE user_id=%s", (user_id,))
                 else: cur.execute("DELETE FROM admin_sessions WHERE user_id=?", (user_id,)); con.commit()
 
+    def delete_admin_user(self, user_id: str) -> bool:
+        user_id = str(user_id or "")
+        if not user_id:
+            return False
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                if self.kind == "postgres":
+                    cur.execute("DELETE FROM admin_sessions WHERE user_id=%s", (user_id,))
+                    cur.execute("DELETE FROM admin_email_otps WHERE user_id=%s", (user_id,))
+                    cur.execute("DELETE FROM admin_email_verified WHERE user_id=%s", (user_id,))
+                    cur.execute("DELETE FROM admin_password_resets WHERE user_id=%s", (user_id,))
+                    cur.execute("DELETE FROM admin_users WHERE id=%s", (user_id,))
+                    deleted = cur.rowcount > 0
+                else:
+                    cur.execute("DELETE FROM admin_sessions WHERE user_id=?", (user_id,))
+                    cur.execute("DELETE FROM admin_email_otps WHERE user_id=?", (user_id,))
+                    cur.execute("DELETE FROM admin_email_verified WHERE user_id=?", (user_id,))
+                    cur.execute("DELETE FROM admin_password_resets WHERE user_id=?", (user_id,))
+                    cur.execute("DELETE FROM admin_users WHERE id=?", (user_id,))
+                    deleted = cur.rowcount > 0
+                    con.commit()
+        return deleted
+
     def health(self) -> dict:
         try:
             with self._connect() as con:
@@ -380,10 +404,10 @@ class GameRoom:
         "ROOM_CREATED":"إنشاء الغرفة", "TEAM_JOINED":"انضمام فريق", "TEAM_REMOVED":"إزالة فريق", "JOIN_OPENED":"فتح الانضمام", "JOIN_CLOSED":"إغلاق الانضمام",
         "GAME_STARTED":"بدء الفقرة", "QUESTION_STARTED":"بدء السؤال", "ANSWER_SUBMITTED":"إرسال إجابة", "QUESTION_TIME_ENDED":"انتهاء وقت السؤال", "QUESTION_TIME_ENDED_MANUALLY":"إنهاء وقت السؤال يدويًا",
         "CORRECTION":"تصحيح الإجابة", "STORAGE_WINDOW_STARTED":"بدء مهلة التخزين", "STORAGE_BUTTON_PRESSED":"اختيار التخزين", "STORED":"تخزين النقاط", "RISK_CONTINUES":"استمرار المخاطرة",
-        "QUESTION_RESOLVED":"اعتماد نتيجة السؤال", "MANUAL_ADD":"إضافة يدوية للخزنة", "MANUAL_DEDUCT":"خصم يدوي من الخزنة", "ROUND_RESET":"إعادة تهيئة الجولة", "GAME_FINISHED":"انتهاء الفقرة"
+        "QUESTION_RESOLVED":"اعتماد نتيجة السؤال", "MANUAL_ADD":"إضافة يدوية للخزنة", "MANUAL_DEDUCT":"خصم يدوي من الخزنة", "ROUND_RESET":"إعادة تهيئة الجولة", "GAME_FINISHED":"انتهاء الفقرة", "ROOM_CLOSED":"إغلاق الغرفة", "ROOM_REOPENED":"إعادة فتح الغرفة"
     }
 
-    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None, owner_user_id: str = ""):
+    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None, owner_user_id: str = "", owner_name: str = "", owner_email: str = ""):
         self.cfg = dict(config)
         self.base_questions = [dict(q) for q in questions]
         self.storage = storage
@@ -392,7 +416,13 @@ class GameRoom:
         self.admin_token = secrets.token_urlsafe(18)
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self.owner_user_id = str(owner_user_id or "")
+        self.owner_name = str(owner_name or "")[:120]
+        self.owner_email = normalize_email(owner_email)
         self.archived_at = None
+        self.closed_at = None
+        self.closed_joins_open = False
+        self.paused_question_remaining_ms = 0
+        self.paused_storage_remaining_ms = 0
         self.lock = threading.RLock()
         self.cv_team = threading.Condition(self.lock)
         self.cv_admin = threading.Condition(self.lock)
@@ -420,7 +450,13 @@ class GameRoom:
         self.admin_token = str(d.get("admin_token") or self.admin_token)
         self.created_at = str(d.get("created_at") or self.created_at)
         self.owner_user_id = str(d.get("owner_user_id") or self.owner_user_id or "")
+        self.owner_name = str(d.get("owner_name") or self.owner_name or "")[:120]
+        self.owner_email = normalize_email(d.get("owner_email") or self.owner_email or "")
         self.archived_at = d.get("archived_at")
+        self.closed_at = d.get("closed_at")
+        self.closed_joins_open = bool(d.get("closed_joins_open", False))
+        self.paused_question_remaining_ms = int(d.get("paused_question_remaining_ms", 0) or 0)
+        self.paused_storage_remaining_ms = int(d.get("paused_storage_remaining_ms", 0) or 0)
         self.questions = [dict(q) for q in d.get("questions", self.base_questions)]
         self.phase = str(d.get("phase", "lobby"))
         self.game_started = bool(d.get("game_started", False))
@@ -437,7 +473,8 @@ class GameRoom:
 
     def snapshot(self) -> dict:
         return {
-            "schema": 2, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at, "owner_user_id": self.owner_user_id, "archived_at": self.archived_at,
+            "schema": 3, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at, "owner_user_id": self.owner_user_id, "owner_name": self.owner_name, "owner_email": self.owner_email, "archived_at": self.archived_at, "closed_at": self.closed_at,
+            "closed_joins_open": self.closed_joins_open, "paused_question_remaining_ms": self.paused_question_remaining_ms, "paused_storage_remaining_ms": self.paused_storage_remaining_ms,
             "questions": self.questions, "phase": self.phase, "game_started": self.game_started, "joins_open": self.joins_open, "index": self.index,
             "question_deadline_ms": self.question_deadline_ms, "storage_deadline_ms": self.storage_deadline_ms, "question_token": self.question_token,
             "closed_question_deadline_ms": self.closed_question_deadline_ms, "correction_ready_ms": self.correction_ready_ms, "teams": self.teams,
@@ -536,6 +573,8 @@ class GameRoom:
 
     def join_team(self, name: str, existing_token: str = ""):
         with self.lock:
+            if self.closed_at:
+                return False, "هذه الغرفة مغلقة وتم نقلها إلى السجل.", None
             name = " ".join(str(name).strip().split())[:80]
             if not name:
                 return False, "اكتب اسم الفريق.", None
@@ -609,6 +648,8 @@ class GameRoom:
 
     def tick(self):
         with self.lock:
+            if self.closed_at:
+                return
             now = self._now_ms()
             if self.phase == "question_open" and now >= self.question_deadline_ms:
                 self.closed_question_deadline_ms = self.question_deadline_ms
@@ -775,10 +816,48 @@ class GameRoom:
             self._changed(team=True, admin=True, display=True)
             return True, f"تم {'إضافة' if mode=='add' else 'خصم'} {actual} نقطة."
 
+    def close_room(self):
+        with self.lock:
+            if self.closed_at:
+                return False, "الغرفة مغلقة بالفعل."
+            now_ms = self._now_ms()
+            self.closed_joins_open = bool(self.joins_open)
+            self.paused_question_remaining_ms = max(0, self.question_deadline_ms - now_ms) if self.phase == "question_open" else 0
+            self.paused_storage_remaining_ms = max(0, self.storage_deadline_ms - now_ms) if self.phase == "storage_open" else 0
+            self.question_deadline_ms = 0
+            self.storage_deadline_ms = 0
+            self.joins_open = False
+            self.closed_at = datetime.now().isoformat(timespec="seconds")
+            self._event("SYSTEM", "ROOM_CLOSED", note="أغلق المشرف الغرفة إداريًا ونقلها إلى السجل")
+            self._changed(team=True, admin=True, display=True)
+            return True, "تم إغلاق الغرفة ونقلها إلى السجل."
+
+    def reopen_room(self):
+        with self.lock:
+            if not self.closed_at:
+                return False, "الغرفة ليست مغلقة."
+            now_ms = self._now_ms()
+            self.closed_at = None
+            if self.phase == "question_open" and self.paused_question_remaining_ms > 0:
+                self.question_deadline_ms = now_ms + self.paused_question_remaining_ms
+            if self.phase == "storage_open" and self.paused_storage_remaining_ms > 0:
+                self.storage_deadline_ms = now_ms + self.paused_storage_remaining_ms
+            if self.phase == "lobby" and not self.game_started:
+                self.joins_open = bool(self.closed_joins_open)
+            self.paused_question_remaining_ms = 0
+            self.paused_storage_remaining_ms = 0
+            self.closed_joins_open = False
+            self._event("SYSTEM", "ROOM_REOPENED", note="أعاد المسؤول الرئيسي فتح الغرفة")
+            self._changed(team=True, admin=True, display=True)
+            return True, "تمت إعادة فتح الغرفة."
+
     def phase_ar(self):
+        if self.closed_at:
+            return "الغرفة مغلقة"
         return {"lobby":"بانتظار الفرق", "ready":"جاهز", "question_open":"وقت الإجابة", "waiting_correction":"بانتظار التصحيح", "storage_open":"وقت التخزين", "resolved":"تم اعتماد النتيجة", "finished":"انتهت الفقرة"}.get(self.phase, self.phase)
 
     def team_status(self, t: dict):
+        if self.closed_at: return "الغرفة مغلقة"
         if self.phase == "lobby": return "داخل الغرفة"
         if self.phase == "question_open": return "تم إرسال الإجابة" if t["submitted"] else ("يكتب الآن" if t["draft"] else "بانتظار الإجابة")
         if self.phase == "waiting_correction": return "بانتظار التصحيح"
@@ -796,14 +875,14 @@ class GameRoom:
     def public_summary(self):
         with self.lock:
             self.tick()
-            return {"ok": True, "code": self.code, "name": self.name, "phase": self.phase, "phase_ar": self.phase_ar(), "joins_open": self.joins_open, "game_started": self.game_started, "team_count": len(self.teams)}
+            return {"ok": True, "code": self.code, "name": self.name, "phase": self.phase, "phase_ar": self.phase_ar(), "joins_open": self.joins_open, "game_started": self.game_started, "team_count": len(self.teams), "room_closed": bool(self.closed_at), "closed_at": self.closed_at}
 
     def team_state(self, team: dict):
         with self.lock:
             self.tick(); now = self._now_ms(); q = self.current_question()
             team["last_seen_ms"] = now
             return {
-                "room_code": self.code, "room_name": self.name, "phase": self.phase, "phase_ar": self.phase_ar(), "joins_open": self.joins_open,
+                "room_code": self.code, "room_name": self.name, "phase": self.phase, "phase_ar": self.phase_ar(), "joins_open": self.joins_open, "room_closed": bool(self.closed_at), "closed_at": self.closed_at,
                 "server_now_ms": now, "question_deadline_ms": self.question_deadline_ms, "storage_deadline_ms": self.storage_deadline_ms,
                 "question_no": self.index + 1 if self.index >= 0 else 0, "total_questions": len(self.questions), "question_token": self.question_token,
                 "question": q["question"] if q and self.phase == "question_open" else "", "team_count": len(self.teams),
@@ -830,7 +909,7 @@ class GameRoom:
                     bucket[key]["team_ids"].append(t["id"]); bucket[key]["team_names"].append(t["name"])
                 groups = sorted(bucket.values(), key=lambda g: (-len(g["team_ids"]), g["answer"]))
             return {
-                "room_code":self.code, "room_name":self.name, "created_at":self.created_at, "archived_at":self.archived_at, "owner_user_id":self.owner_user_id, "phase":self.phase, "phase_ar":self.phase_ar(), "joins_open":self.joins_open, "game_started":self.game_started,
+                "room_code":self.code, "room_name":self.name, "created_at":self.created_at, "archived_at":self.archived_at, "closed_at":self.closed_at, "room_closed":bool(self.closed_at), "owner_user_id":self.owner_user_id, "owner_name":self.owner_name, "owner_email":self.owner_email, "phase":self.phase, "phase_ar":self.phase_ar(), "joins_open":self.joins_open, "game_started":self.game_started,
                 "server_now_ms":now, "question_deadline_ms":self.question_deadline_ms, "storage_deadline_ms":self.storage_deadline_ms, "correction_ready_ms":self.correction_ready_ms,
                 "question_no":self.index+1 if self.index>=0 else 0, "total_questions":len(self.questions), "question_token":self.question_token,
                 "question":q["question"] if q else "", "correct_answer":q["correct_answer"] if q else "", "difficulty":q["difficulty"] if q else 0,
@@ -844,7 +923,10 @@ class GameRoom:
             answered = sum(1 for t in self.teams.values() if t["answer"] or t["draft"])
             correct = sum(1 for t in self.teams.values() if t.get("correction") is True)
             storage_waiting = sum(1 for t in self.teams.values() if t.get("correction") is True and t.get("decision") is None)
-            if self.phase == "question_open":
+            if self.closed_at:
+                headline = "الغرفة مغلقة"
+                timer = 0; subline = "تم نقل الغرفة إلى السجل"
+            elif self.phase == "question_open":
                 headline = q["question"] if q else ""
                 timer = max(0, math.ceil((self.question_deadline_ms-now)/1000))
                 subline = f"تم الإرسال: {submitted} / {total}"
@@ -864,7 +946,7 @@ class GameRoom:
             else:
                 headline = self.name
                 timer = 0; subline = f"رمز الغرفة: {self.code} — {total} فريقًا منضمًا"
-            return {"room_code":self.code, "room_name":self.name, "phase":self.phase, "phase_ar":self.phase_ar(), "server_now_ms":now, "question_deadline_ms":self.question_deadline_ms, "storage_deadline_ms":self.storage_deadline_ms, "question_no":self.index+1 if self.index>=0 else 0, "total_questions":len(self.questions), "headline":headline, "subline":subline, "timer":timer, "team_count":total, "submitted_count":submitted, "leaderboard":self.leaderboard(10)}
+            return {"room_code":self.code, "room_name":self.name, "phase":self.phase, "phase_ar":self.phase_ar(), "room_closed":bool(self.closed_at), "closed_at":self.closed_at, "server_now_ms":now, "question_deadline_ms":self.question_deadline_ms, "storage_deadline_ms":self.storage_deadline_ms, "question_no":self.index+1 if self.index>=0 else 0, "total_questions":len(self.questions), "headline":headline, "subline":subline, "timer":timer, "team_count":total, "submitted_count":submitted, "leaderboard":self.leaderboard(10)}
 
 
 class RoomManager:
@@ -916,9 +998,9 @@ class RoomManager:
                 code = "".join(secrets.choice(self.ALPHABET) for _ in range(4))
                 if code not in self.rooms: return code
             raise RuntimeError("Unable to generate room code")
-    def create_room(self, name: str, owner_user_id: str = ""):
+    def create_room(self, name: str, owner_user_id: str = "", owner_name: str = "", owner_email: str = ""):
         with self.lock:
-            code = self.new_code(); room = GameRoom(self.cfg, self.questions, code, name, self.storage, owner_user_id=owner_user_id); self.rooms[code] = room
+            code = self.new_code(); room = GameRoom(self.cfg, self.questions, code, name, self.storage, owner_user_id=owner_user_id, owner_name=owner_name, owner_email=owner_email); self.rooms[code] = room
             with room.lock:
                 room._changed(team=True, admin=True, display=True)
             return room
@@ -935,12 +1017,27 @@ class RoomManager:
     def can_access(self, user: dict | None, room: GameRoom | None) -> bool:
         if not user or not room or user.get("status") != "approved": return False
         return user.get("role") == "super_admin" or (room.owner_user_id and room.owner_user_id == user.get("id"))
+    def preserve_owner_identity(self, user: dict) -> int:
+        changed = 0
+        user_id = str(user.get("id") or "")
+        if not user_id:
+            return 0
+        with self.lock:
+            rooms = list(self.rooms.values())
+        for room in rooms:
+            with room.lock:
+                if room.owner_user_id == user_id:
+                    room.owner_name = room.owner_name or str(user.get("name") or "")[:120]
+                    room.owner_email = room.owner_email or normalize_email(user.get("email") or "")
+                    room._persist()
+                    changed += 1
+        return changed
     def list_rooms(self, user: dict | None = None):
         with self.lock:
             rooms=sorted(self.rooms.values(), key=lambda x:x.created_at, reverse=True)
         if user:
             rooms=[r for r in rooms if self.can_access(user,r)]
-        return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"archived_at":r.archived_at,"is_archived":bool(r.archived_at or r.phase=="finished"),"leaderboard":r.leaderboard(10)} for r in rooms]
+        return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"archived_at":r.archived_at,"closed_at":r.closed_at,"is_closed":bool(r.closed_at),"is_archived":bool(r.closed_at or r.archived_at or r.phase=="finished"),"owner_user_id":r.owner_user_id,"owner_name":r.owner_name,"owner_email":r.owner_email,"leaderboard":r.leaderboard(10)} for r in rooms]
 
 
 CONFIG, QUESTIONS = load_data()
@@ -949,7 +1046,7 @@ MANAGER = RoomManager(CONFIG, QUESTIONS)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.40"
+    server_version = "VaultWeb/0.45"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1218,7 +1315,11 @@ class Handler(BaseHTTPRequestHandler):
             if not admin: return self._json(403,{"ok":False,"message":"هذه الصلاحية للمسؤول الرئيسي فقط."})
             target_id=str(p.get("user_id", "")); target=MANAGER.storage.get_admin_user_by_id(target_id)
             if not target: return self._json(404,{"ok":False,"message":"الحساب غير موجود."})
-            if target.get("role")=="super_admin" and target.get("id")==admin.get("id"): return self._json(409,{"ok":False,"message":"لا يمكن تغيير حالة حساب المسؤول الرئيسي من هنا."})
+            if target.get("role")=="super_admin": return self._json(409,{"ok":False,"message":"لا يمكن تعديل أو حذف حساب المسؤول الرئيسي من هنا."})
+            if path=="/api/admin/users/delete":
+                MANAGER.preserve_owner_identity(target)
+                deleted=MANAGER.storage.delete_admin_user(target_id)
+                return self._json(200 if deleted else 404,{"ok":bool(deleted),"message":"تم حذف الحساب مع الاحتفاظ بسجل الغرف السابقة." if deleted else "الحساب غير موجود."})
             if path=="/api/admin/users/approve":
                 if email_auth.enabled() and not email_auth.is_verified(MANAGER.storage,target):
                     return self._json(409,{"ok":False,"message":"لا يمكن اعتماد الحساب قبل تأكيد البريد الإلكتروني."})
@@ -1241,7 +1342,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/admin/create_room":
             user=self._require_user()
             if not user or user.get("role") not in {"super_admin","supervisor"}: return self._json(403,{"ok":False,"message":"لا تملك صلاحية إنشاء غرفة."})
-            room=MANAGER.create_room(str(p.get("room_name","")).strip() or "غرفة الخزنة", owner_user_id=user["id"])
+            room=MANAGER.create_room(str(p.get("room_name","")).strip() or "غرفة الخزنة", owner_user_id=user["id"], owner_name=user.get("name",""), owner_email=user.get("email",""))
             return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة.","room":{"code":room.code,"name":room.name,"admin_url":f"/room-admin?code={room.code}","display_url":f"/display?code={room.code}"}})
         if path=="/api/admin/check_pin":
             ok=(not MANAGER.storage.superadmin_exists()) and self._master_pin_ok(p,u); return self._json(200 if ok else 403,{"ok":ok,"message":"الرمز صالح للتهيئة الأولى." if ok else "الرمز غير صالح أو تم إنشاء المسؤول الرئيسي مسبقًا."})
@@ -1251,7 +1352,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/admin/"):
             if not self._admin_auth(room,u,p): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
-            if path=="/api/admin/toggle_join": ok,msg=room.set_join_open(bool(p.get("open")))
+            if path=="/api/admin/close_room":
+                ok,msg=room.close_room()
+            elif path=="/api/admin/reopen_room":
+                admin=self._require_superadmin()
+                if not admin: return self._json(403,{"ok":False,"message":"إعادة فتح الغرفة متاحة للمسؤول الرئيسي فقط."})
+                ok,msg=room.reopen_room()
+            elif room.closed_at:
+                return self._json(409,{"ok":False,"message":"الغرفة مغلقة. يمكن للمسؤول الرئيسي إعادة فتحها من السجل."})
+            elif path=="/api/admin/toggle_join": ok,msg=room.set_join_open(bool(p.get("open")))
             elif path=="/api/admin/remove_team": ok,msg=room.remove_team(str(p.get("team_id","")))
             elif path=="/api/admin/start_game": ok,msg=room.start_game()
             elif path=="/api/admin/start_next": ok,msg=room.start_next()
@@ -1265,6 +1374,7 @@ class Handler(BaseHTTPRequestHandler):
             else: return self._send(404,b"Not found")
             return self._json(200 if ok else 409,{"ok":ok,"message":msg})
 
+        if room.closed_at: return self._json(409,{"ok":False,"message":"هذه الغرفة مغلقة وتم نقلها إلى السجل."})
         team=self._team_auth(room,u,p)
         if not team: return self._json(403,{"ok":False,"message":"جلسة الفريق غير صالحة."})
         if path=="/api/team/draft": ok,msg=room.update_draft(team,p.get("draft",""),p.get("revision",0),p.get("question_token",0))
