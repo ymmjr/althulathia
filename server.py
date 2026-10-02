@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 import zipfile
+import email_auth
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -26,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.40"
+VERSION = "Vault Web v0.41"
 
 
 
@@ -70,6 +71,7 @@ class Storage:
         self.last_error = ""
         self._lock = threading.RLock()
         self._init_schema()
+        email_auth.init_schema(self)
 
     def _connect(self):
         if self.kind == "postgres":
@@ -1050,7 +1052,7 @@ class Handler(BaseHTTPRequestHandler):
             db=MANAGER.storage.health(); return self._json(200 if db.get("ok") else 503,{"ok":bool(db.get("ok")),"version":VERSION,"rooms":len(MANAGER.rooms),"database":db,"realtime":"sse","admin_pin_is_default":str(CONFIG["admin_pin"])=="2468"})
         if path=="/api/auth/status":
             user=self._current_user(); needs_setup=not MANAGER.storage.superadmin_exists()
-            return self._json(200,{"ok":True,"needs_setup":needs_setup,"logged_in":bool(user),"user":public_user(user)})
+            return self._json(200,{"ok":True,"needs_setup":needs_setup,"logged_in":bool(user),"user":public_user(user),"email_auth":email_auth.status_payload()})
         if path=="/api/admin/users":
             user=self._require_superadmin()
             if not user: return self._json(403,{"ok":False,"message":"هذه الصلاحية للمسؤول الرئيسي فقط."})
@@ -1127,15 +1129,68 @@ class Handler(BaseHTTPRequestHandler):
             if not EMAIL_RE.match(email): return self._json(400,{"ok":False,"message":"اكتب بريدًا إلكترونيًا صحيحًا."})
             if len(name)<2: return self._json(400,{"ok":False,"message":"اكتب اسم المشرف."})
             if len(password)<8: return self._json(400,{"ok":False,"message":"كلمة المرور يجب أن تكون 8 أحرف على الأقل."})
-            if MANAGER.storage.get_admin_user_by_email(email): return self._json(409,{"ok":False,"message":"هذا البريد مسجل مسبقًا."})
+            existing=MANAGER.storage.get_admin_user_by_email(email)
+            if existing:
+                if email_auth.enabled() and existing.get("status")=="email_unverified":
+                    return self._json(409,{"ok":False,"message":"هذا البريد مسجل ولم يتم تأكيده بعد. أدخل رمز التحقق أو اطلب رمزًا جديدًا.","requires_verification":True,"email":email})
+                return self._json(409,{"ok":False,"message":"هذا البريد مسجل مسبقًا."})
+            if email_auth.enabled() and not email_auth.configured():
+                return self._json(503,{"ok":False,"message":"خدمة البريد غير جاهزة حاليًا. تواصل مع الدعم الفني."})
             try:
-                user=MANAGER.storage.create_admin_user(email,name,hash_password(password),role="supervisor",status="pending")
+                status="email_unverified" if email_auth.enabled() else "pending"
+                user=MANAGER.storage.create_admin_user(email,name,hash_password(password),role="supervisor",status=status)
+                if email_auth.enabled():
+                    try:
+                        delivery=email_auth.issue_otp(MANAGER.storage,user)
+                        return self._json(200,{"ok":True,"message":"تم إرسال رمز تحقق إلى بريدك الإلكتروني.","user":public_user(user),"requires_verification":True,"email":email,"otp_expires_in":delivery.get("expires_in",600),"resend_after":delivery.get("resend_after",60)})
+                    except Exception as e:
+                        print(f"[EMAIL] OTP send failed for {email}: {e}")
+                        return self._json(503,{"ok":False,"message":"تم إنشاء الحساب لكن تعذر إرسال رمز التحقق. جرّب إعادة الإرسال بعد قليل.","requires_verification":True,"email":email})
                 return self._json(200,{"ok":True,"message":"تم إنشاء الحساب وهو بانتظار اعتماد المسؤول الرئيسي.","user":public_user(user)})
-            except Exception:
+            except Exception as e:
+                print(f"[AUTH] signup failed: {e}")
                 return self._json(500,{"ok":False,"message":"تعذر إنشاء الحساب."})
+        if path=="/api/auth/verify-email":
+            if not email_auth.enabled(): return self._json(409,{"ok":False,"message":"تأكيد البريد غير مفعّل."})
+            email=normalize_email(p.get("email","")); code=str(p.get("code","")).strip()
+            if not EMAIL_RE.match(email) or not re.fullmatch(r"\d{6}",code):
+                return self._json(400,{"ok":False,"message":"أدخل البريد ورمز التحقق المكوّن من 6 أرقام."})
+            try:
+                ok,msg,user=email_auth.verify_otp(MANAGER.storage,email,code)
+                return self._json(200 if ok else 400,{"ok":ok,"message":msg,"user":public_user(user),"requires_approval":bool(ok)})
+            except Exception as e:
+                print(f"[EMAIL] verify failed for {email}: {e}")
+                return self._json(500,{"ok":False,"message":"تعذر التحقق من الرمز حاليًا."})
+        if path=="/api/auth/resend-otp":
+            if not email_auth.enabled(): return self._json(409,{"ok":False,"message":"تأكيد البريد غير مفعّل."})
+            email=normalize_email(p.get("email",""))
+            if not EMAIL_RE.match(email): return self._json(400,{"ok":False,"message":"اكتب بريدًا إلكترونيًا صحيحًا."})
+            try:
+                ok,msg,extra=email_auth.resend_otp(MANAGER.storage,email)
+                return self._json(200 if ok else 429,{"ok":ok,"message":msg,**extra})
+            except Exception as e:
+                print(f"[EMAIL] resend OTP failed for {email}: {e}")
+                return self._json(503,{"ok":False,"message":"تعذر إرسال الرمز حاليًا. جرّب مرة أخرى بعد قليل."})
+        if path=="/api/auth/forgot-password":
+            email=normalize_email(p.get("email",""))
+            generic="إذا كان البريد مسجلًا لدينا فستصلك رسالة إعادة تعيين كلمة المرور."
+            if email_auth.enabled() and email_auth.configured() and EMAIL_RE.match(email):
+                threading.Thread(target=lambda: email_auth.request_password_reset(MANAGER.storage,email),daemon=True).start()
+            return self._json(200,{"ok":True,"message":generic})
+        if path=="/api/auth/reset-password":
+            if not email_auth.enabled(): return self._json(409,{"ok":False,"message":"استعادة كلمة المرور غير مفعّلة."})
+            token=str(p.get("token","")).strip(); password=str(p.get("password",""))
+            if len(password)<8: return self._json(400,{"ok":False,"message":"كلمة المرور يجب أن تكون 8 أحرف على الأقل."})
+            try:
+                ok,msg=email_auth.reset_password(MANAGER.storage,token,hash_password(password))
+                return self._json(200 if ok else 400,{"ok":ok,"message":msg})
+            except Exception as e:
+                print(f"[EMAIL] reset password failed: {e}")
+                return self._json(500,{"ok":False,"message":"تعذر تحديث كلمة المرور حاليًا."})
         if path=="/api/auth/login":
             email=normalize_email(p.get("email","")); password=str(p.get("password", "")); user=MANAGER.storage.get_admin_user_by_email(email)
             if not user or not verify_password(password,user.get("password_hash","")): return self._json(403,{"ok":False,"message":"البريد أو كلمة المرور غير صحيحة."})
+            if user.get("status")=="email_unverified": return self._json(403,{"ok":False,"message":"يجب تأكيد بريدك الإلكتروني أولًا.","requires_verification":True,"email":email})
             if user.get("status")=="pending": return self._json(403,{"ok":False,"message":"حسابك بانتظار اعتماد المسؤول الرئيسي."})
             if user.get("status")!="approved": return self._json(403,{"ok":False,"message":"هذا الحساب غير مفعل."})
             token=MANAGER.storage.create_admin_session(user["id"]); MANAGER.storage.touch_admin_login(user["id"]); user=MANAGER.storage.get_admin_user_by_id(user["id"])
@@ -1149,7 +1204,12 @@ class Handler(BaseHTTPRequestHandler):
             target_id=str(p.get("user_id", "")); target=MANAGER.storage.get_admin_user_by_id(target_id)
             if not target: return self._json(404,{"ok":False,"message":"الحساب غير موجود."})
             if target.get("role")=="super_admin" and target.get("id")==admin.get("id"): return self._json(409,{"ok":False,"message":"لا يمكن تغيير حالة حساب المسؤول الرئيسي من هنا."})
-            if path=="/api/admin/users/approve": updated=MANAGER.storage.set_admin_user_status(target_id,"approved",approved_by=admin["id"],role="supervisor")
+            if path=="/api/admin/users/approve":
+                if target.get("status")=="email_unverified":
+                    return self._json(409,{"ok":False,"message":"لا يمكن اعتماد الحساب قبل تأكيد البريد الإلكتروني."})
+                updated=MANAGER.storage.set_admin_user_status(target_id,"approved",approved_by=admin["id"],role="supervisor")
+                if email_auth.enabled() and email_auth.configured():
+                    threading.Thread(target=lambda u=updated: email_auth.send_approval_email(u),daemon=True).start()
             elif path=="/api/admin/users/reject":
                 MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"rejected",approved_by=admin["id"],role="supervisor")
             elif path=="/api/admin/users/disable":
