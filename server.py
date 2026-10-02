@@ -1485,9 +1485,11 @@ class Handler(BaseHTTPRequestHandler):
                 if email_auth.enabled() and email_auth.configured():
                     threading.Thread(target=lambda u=updated: email_auth.send_approval_email(u),daemon=True).start()
             elif path=="/api/admin/users/reject":
-                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"rejected",approved_by=admin["id"],role="supervisor")
+                role=target.get("role") if target.get("role") in {"assistant_admin","supervisor"} else "supervisor"
+                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"rejected",approved_by=admin["id"],role=role)
             elif path=="/api/admin/users/disable":
-                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"disabled",approved_by=admin["id"],role="supervisor")
+                role=target.get("role") if target.get("role") in {"assistant_admin","supervisor"} else "supervisor"
+                MANAGER.storage.delete_sessions_for_user(target_id); updated=MANAGER.storage.set_admin_user_status(target_id,"disabled",approved_by=admin["id"],role=role)
             else: return self._send(404,b"Not found")
             return self._json(200,{"ok":True,"user":public_user(updated)})
         if path=="/api/join":
