@@ -791,7 +791,7 @@ MANAGER = RoomManager(CONFIG, QUESTIONS)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.31"
+    server_version = "VaultWeb/0.32"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
