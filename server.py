@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
 import math
 import os
 import random
+import re
 import secrets
 import socket
 import sqlite3
@@ -23,9 +26,37 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.32"
+VERSION = "Vault Web v0.40"
 
 
+
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+
+def normalize_email(value: str) -> str:
+    return str(value or "").strip().lower()[:254]
+
+def hash_password(password: str, iterations: int = 310_000) -> str:
+    password = str(password or "")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return "pbkdf2_sha256$%d$%s$%s" % (iterations, base64.urlsafe_b64encode(salt).decode().rstrip("="), base64.urlsafe_b64encode(digest).decode().rstrip("="))
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        scheme, iters, salt_b64, digest_b64 = str(stored).split("$", 3)
+        if scheme != "pbkdf2_sha256": return False
+        pad = lambda x: x + "=" * (-len(x) % 4)
+        salt = base64.urlsafe_b64decode(pad(salt_b64))
+        expected = base64.urlsafe_b64decode(pad(digest_b64))
+        actual = hashlib.pbkdf2_hmac("sha256", str(password or "").encode("utf-8"), salt, int(iters))
+        return secrets.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+def public_user(user: dict | None) -> dict | None:
+    if not user: return None
+    return {k: user.get(k) for k in ("id","email","name","role","status","created_at","approved_at","last_login_at")}
 
 
 class Storage:
@@ -60,6 +91,9 @@ class Storage:
                         cur.execute("PRAGMA journal_mode=WAL"); cur.execute("PRAGMA synchronous=FULL")
                     cur.execute("CREATE TABLE IF NOT EXISTS vault_rooms (code TEXT PRIMARY KEY, snapshot TEXT NOT NULL, updated_at TEXT NOT NULL)")
                     cur.execute("CREATE TABLE IF NOT EXISTS vault_events (room_code TEXT NOT NULL, event_no INTEGER NOT NULL, row_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(room_code,event_no))")
+                    cur.execute("CREATE TABLE IF NOT EXISTS admin_users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, approved_at TEXT, approved_by TEXT, last_login_at TEXT)")
+                    cur.execute("CREATE TABLE IF NOT EXISTS admin_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at BIGINT NOT NULL)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id)")
                     if self.kind == "sqlite": con.commit()
                 self.last_error = ""
             except Exception as e:
@@ -125,6 +159,103 @@ class Storage:
             except Exception as e:
                 self.last_error = str(e)
                 raise
+
+    def _fetchone(self, sql_pg: str, sql_sqlite: str, params=()):
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor(); cur.execute(sql_pg if self.kind == "postgres" else sql_sqlite, params); row = cur.fetchone()
+            return row
+
+    def superadmin_exists(self) -> bool:
+        row = self._fetchone("SELECT 1 FROM admin_users WHERE role=%s AND status=%s LIMIT 1", "SELECT 1 FROM admin_users WHERE role=? AND status=? LIMIT 1", ("super_admin","approved"))
+        return bool(row)
+
+    def create_admin_user(self, email: str, name: str, password_hash: str, role="supervisor", status="pending") -> dict:
+        user_id = uuid.uuid4().hex
+        now = datetime.now().isoformat(timespec="seconds")
+        email = normalize_email(email); name = " ".join(str(name or "").strip().split())[:120]
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                if self.kind == "postgres":
+                    cur.execute("INSERT INTO admin_users(id,email,name,password_hash,role,status,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)", (user_id,email,name,password_hash,role,status,now))
+                else:
+                    cur.execute("INSERT INTO admin_users(id,email,name,password_hash,role,status,created_at) VALUES (?,?,?,?,?,?,?)", (user_id,email,name,password_hash,role,status,now)); con.commit()
+        return self.get_admin_user_by_id(user_id)
+
+    def get_admin_user_by_email(self, email: str) -> dict | None:
+        row = self._fetchone("SELECT id,email,name,password_hash,role,status,created_at,approved_at,approved_by,last_login_at FROM admin_users WHERE email=%s", "SELECT id,email,name,password_hash,role,status,created_at,approved_at,approved_by,last_login_at FROM admin_users WHERE email=?", (normalize_email(email),))
+        if not row: return None
+        keys=("id","email","name","password_hash","role","status","created_at","approved_at","approved_by","last_login_at"); return dict(zip(keys,row))
+
+    def get_admin_user_by_id(self, user_id: str) -> dict | None:
+        row = self._fetchone("SELECT id,email,name,password_hash,role,status,created_at,approved_at,approved_by,last_login_at FROM admin_users WHERE id=%s", "SELECT id,email,name,password_hash,role,status,created_at,approved_at,approved_by,last_login_at FROM admin_users WHERE id=?", (str(user_id),))
+        if not row: return None
+        keys=("id","email","name","password_hash","role","status","created_at","approved_at","approved_by","last_login_at"); return dict(zip(keys,row))
+
+    def list_admin_users(self) -> list[dict]:
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor(); cur.execute("SELECT id,email,name,role,status,created_at,approved_at,approved_by,last_login_at FROM admin_users ORDER BY created_at DESC"); rows=cur.fetchall()
+        keys=("id","email","name","role","status","created_at","approved_at","approved_by","last_login_at")
+        return [dict(zip(keys,r)) for r in rows]
+
+    def set_admin_user_status(self, user_id: str, status: str, approved_by: str | None = None, role: str | None = None) -> dict | None:
+        now = datetime.now().isoformat(timespec="seconds") if status == "approved" else None
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind == "postgres":
+                    if role: cur.execute("UPDATE admin_users SET status=%s, role=%s, approved_at=%s, approved_by=%s WHERE id=%s", (status,role,now,approved_by,user_id))
+                    else: cur.execute("UPDATE admin_users SET status=%s, approved_at=%s, approved_by=%s WHERE id=%s", (status,now,approved_by,user_id))
+                else:
+                    if role: cur.execute("UPDATE admin_users SET status=?, role=?, approved_at=?, approved_by=? WHERE id=?", (status,role,now,approved_by,user_id))
+                    else: cur.execute("UPDATE admin_users SET status=?, approved_at=?, approved_by=? WHERE id=?", (status,now,approved_by,user_id))
+                    con.commit()
+        return self.get_admin_user_by_id(user_id)
+
+    def touch_admin_login(self, user_id: str) -> None:
+        now=datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind == "postgres": cur.execute("UPDATE admin_users SET last_login_at=%s WHERE id=%s", (now,user_id))
+                else: cur.execute("UPDATE admin_users SET last_login_at=? WHERE id=?", (now,user_id)); con.commit()
+
+    def create_admin_session(self, user_id: str) -> str:
+        token=secrets.token_urlsafe(32); token_hash=hashlib.sha256(token.encode()).hexdigest(); now=datetime.now().isoformat(timespec="seconds"); expires=int(time.time())+SESSION_TTL_SECONDS
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind == "postgres": cur.execute("INSERT INTO admin_sessions(token_hash,user_id,created_at,expires_at) VALUES (%s,%s,%s,%s)", (token_hash,user_id,now,expires))
+                else: cur.execute("INSERT INTO admin_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)", (token_hash,user_id,now,expires)); con.commit()
+        return token
+
+    def get_user_by_session(self, token: str) -> dict | None:
+        if not token: return None
+        token_hash=hashlib.sha256(str(token).encode()).hexdigest(); now=int(time.time())
+        row=self._fetchone("SELECT u.id,u.email,u.name,u.password_hash,u.role,u.status,u.created_at,u.approved_at,u.approved_by,u.last_login_at,s.expires_at FROM admin_sessions s JOIN admin_users u ON u.id=s.user_id WHERE s.token_hash=%s", "SELECT u.id,u.email,u.name,u.password_hash,u.role,u.status,u.created_at,u.approved_at,u.approved_by,u.last_login_at,s.expires_at FROM admin_sessions s JOIN admin_users u ON u.id=s.user_id WHERE s.token_hash=?", (token_hash,))
+        if not row: return None
+        if int(row[-1]) < now:
+            self.delete_admin_session(token); return None
+        keys=("id","email","name","password_hash","role","status","created_at","approved_at","approved_by","last_login_at"); user=dict(zip(keys,row[:-1]))
+        return user if user.get("status") == "approved" else None
+
+    def delete_admin_session(self, token: str) -> None:
+        if not token: return
+        token_hash=hashlib.sha256(str(token).encode()).hexdigest()
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind == "postgres": cur.execute("DELETE FROM admin_sessions WHERE token_hash=%s", (token_hash,))
+                else: cur.execute("DELETE FROM admin_sessions WHERE token_hash=?", (token_hash,)); con.commit()
+
+    def delete_sessions_for_user(self, user_id: str) -> None:
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind == "postgres": cur.execute("DELETE FROM admin_sessions WHERE user_id=%s", (user_id,))
+                else: cur.execute("DELETE FROM admin_sessions WHERE user_id=?", (user_id,)); con.commit()
 
     def health(self) -> dict:
         try:
@@ -250,7 +381,7 @@ class GameRoom:
         "QUESTION_RESOLVED":"اعتماد نتيجة السؤال", "MANUAL_ADD":"إضافة يدوية للخزنة", "MANUAL_DEDUCT":"خصم يدوي من الخزنة", "ROUND_RESET":"إعادة تهيئة الجولة", "GAME_FINISHED":"انتهاء الفقرة"
     }
 
-    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None):
+    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None, owner_user_id: str = ""):
         self.cfg = dict(config)
         self.base_questions = [dict(q) for q in questions]
         self.storage = storage
@@ -258,6 +389,8 @@ class GameRoom:
         self.name = name.strip() or f"غرفة {code}"
         self.admin_token = secrets.token_urlsafe(18)
         self.created_at = datetime.now().isoformat(timespec="seconds")
+        self.owner_user_id = str(owner_user_id or "")
+        self.archived_at = None
         self.lock = threading.RLock()
         self.cv_team = threading.Condition(self.lock)
         self.cv_admin = threading.Condition(self.lock)
@@ -284,6 +417,8 @@ class GameRoom:
         self.name = str(d.get("name", self.name))
         self.admin_token = str(d.get("admin_token") or self.admin_token)
         self.created_at = str(d.get("created_at") or self.created_at)
+        self.owner_user_id = str(d.get("owner_user_id") or self.owner_user_id or "")
+        self.archived_at = d.get("archived_at")
         self.questions = [dict(q) for q in d.get("questions", self.base_questions)]
         self.phase = str(d.get("phase", "lobby"))
         self.game_started = bool(d.get("game_started", False))
@@ -300,7 +435,7 @@ class GameRoom:
 
     def snapshot(self) -> dict:
         return {
-            "schema": 1, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at,
+            "schema": 2, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at, "owner_user_id": self.owner_user_id, "archived_at": self.archived_at,
             "questions": self.questions, "phase": self.phase, "game_started": self.game_started, "joins_open": self.joins_open, "index": self.index,
             "question_deadline_ms": self.question_deadline_ms, "storage_deadline_ms": self.storage_deadline_ms, "question_token": self.question_token,
             "closed_question_deadline_ms": self.closed_question_deadline_ms, "correction_ready_ms": self.correction_ready_ms, "teams": self.teams,
@@ -446,6 +581,7 @@ class GameRoom:
 
     def reset_round(self):
         with self.lock:
+            self.archived_at = None
             self._init_round(clear_scores=True)
             self._event("SYSTEM", "ROUND_RESET", note="إعادة جميع الفرق إلى Lobby وتصفير الجولة")
             self._changed(team=True, admin=True, display=True)
@@ -490,6 +626,7 @@ class GameRoom:
             if self.phase not in {"ready", "resolved"}: return False, "لا يمكن بدء سؤال جديد قبل انتهاء المرحلة الحالية."
             if self.index + 1 >= len(self.questions):
                 self.phase = "finished"
+                self.archived_at = self.archived_at or datetime.now().isoformat(timespec="seconds")
                 self._event("SYSTEM", "GAME_FINISHED", note="انتهت فقرة الخزنة")
                 self._changed(team=True, admin=True, display=True)
                 return True, "انتهت الفقرة."
@@ -579,6 +716,7 @@ class GameRoom:
                     t["vault"] += stored; t["risk"] = 0; t["value"] = 1; t["decision"] = "store"
                     self._event(team_id, "STORED", value=stored, vault_before=vb, vault_after=t["vault"], risk_before=rb, risk_after=0, multiplier_before=mb, multiplier_after=1, correct="صحيح", decision="store", note="السؤال الأخير: تخزين تلقائي")
                 self.phase = "finished"; self.storage_deadline_ms = 0
+                self.archived_at = self.archived_at or datetime.now().isoformat(timespec="seconds")
                 self._event("SYSTEM", "QUESTION_RESOLVED", note="تم اعتماد نتيجة السؤال الأخير")
                 self._event("SYSTEM", "GAME_FINISHED", note="انتهت الفقرة بعد السؤال الأخير")
                 self._changed(team=True, admin=True, display=True)
@@ -690,7 +828,7 @@ class GameRoom:
                     bucket[key]["team_ids"].append(t["id"]); bucket[key]["team_names"].append(t["name"])
                 groups = sorted(bucket.values(), key=lambda g: (-len(g["team_ids"]), g["answer"]))
             return {
-                "room_code":self.code, "room_name":self.name, "created_at":self.created_at, "phase":self.phase, "phase_ar":self.phase_ar(), "joins_open":self.joins_open, "game_started":self.game_started,
+                "room_code":self.code, "room_name":self.name, "created_at":self.created_at, "archived_at":self.archived_at, "owner_user_id":self.owner_user_id, "phase":self.phase, "phase_ar":self.phase_ar(), "joins_open":self.joins_open, "game_started":self.game_started,
                 "server_now_ms":now, "question_deadline_ms":self.question_deadline_ms, "storage_deadline_ms":self.storage_deadline_ms, "correction_ready_ms":self.correction_ready_ms,
                 "question_no":self.index+1 if self.index>=0 else 0, "total_questions":len(self.questions), "question_token":self.question_token,
                 "question":q["question"] if q else "", "correct_answer":q["correct_answer"] if q else "", "difficulty":q["difficulty"] if q else 0,
@@ -744,6 +882,9 @@ class RoomManager:
                 code = str(snap.get("code", "")).strip().upper()
                 if not code: continue
                 room = GameRoom(self.cfg, self.questions, code, str(snap.get("name", "")), self.storage, restored=snap)
+                if room.phase == "finished" and not room.archived_at:
+                    room.archived_at = datetime.now().isoformat(timespec="seconds")
+                    room._persist()
                 self.rooms[code] = room; restored += 1
             except Exception as e:
                 print(f"[STORAGE] failed restoring room: {e}")
@@ -773,16 +914,31 @@ class RoomManager:
                 code = "".join(secrets.choice(self.ALPHABET) for _ in range(4))
                 if code not in self.rooms: return code
             raise RuntimeError("Unable to generate room code")
-    def create_room(self, name: str):
+    def create_room(self, name: str, owner_user_id: str = ""):
         with self.lock:
-            code = self.new_code(); room = GameRoom(self.cfg, self.questions, code, name, self.storage); self.rooms[code] = room
+            code = self.new_code(); room = GameRoom(self.cfg, self.questions, code, name, self.storage, owner_user_id=owner_user_id); self.rooms[code] = room
             with room.lock:
                 room._changed(team=True, admin=True, display=True)
             return room
     def get(self, code: str): return self.rooms.get(str(code).strip().upper())
-    def list_rooms(self):
+    def claim_unowned_rooms(self, owner_user_id: str):
+        claimed=0
         with self.lock:
-            return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"admin_token":r.admin_token} for r in sorted(self.rooms.values(), key=lambda x:x.created_at, reverse=True)]
+            rooms=list(self.rooms.values())
+        for r in rooms:
+            with r.lock:
+                if not r.owner_user_id:
+                    r.owner_user_id=str(owner_user_id); r._persist(); claimed+=1
+        return claimed
+    def can_access(self, user: dict | None, room: GameRoom | None) -> bool:
+        if not user or not room or user.get("status") != "approved": return False
+        return user.get("role") == "super_admin" or (room.owner_user_id and room.owner_user_id == user.get("id"))
+    def list_rooms(self, user: dict | None = None):
+        with self.lock:
+            rooms=sorted(self.rooms.values(), key=lambda x:x.created_at, reverse=True)
+        if user:
+            rooms=[r for r in rooms if self.can_access(user,r)]
+        return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"archived_at":r.archived_at,"is_archived":bool(r.archived_at or r.phase=="finished"),"leaderboard":r.leaderboard(10)} for r in rooms]
 
 
 CONFIG, QUESTIONS = load_data()
@@ -791,7 +947,7 @@ MANAGER = RoomManager(CONFIG, QUESTIONS)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.32"
+    server_version = "VaultWeb/0.40"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -828,7 +984,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
         self.close_connection = True
-    def _json(self, status, obj): self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+    def _json(self, status, obj, extra=None): self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", extra)
     def _read_json(self):
         try:
             n=int(self.headers.get("Content-Length","0")); return json.loads((self.rfile.read(n) if n else b"{}").decode("utf-8"))
@@ -839,124 +995,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200,text.encode("utf-8"),"text/html; charset=utf-8")
     def _room_from(self, u, payload=None):
         payload = payload or {}; qs = parse_qs(u.query); code = str(payload.get("code") or qs.get("code", [""])[0]).strip().upper(); return MANAGER.get(code), code
-    def _admin_auth(self, room, u, payload=None):
-        if not room: return False
-        payload=payload or {}; qs=parse_qs(u.query); token=str(payload.get("admin_token") or qs.get("token",[""])[0]); return bool(token and secrets.compare_digest(room.admin_token, token))
-    def _team_auth(self, room, u, payload=None):
-        if not room: return None
-        payload=payload or {}; qs=parse_qs(u.query); token=str(payload.get("team_token") or qs.get("token",[""])[0]); return room.validate_team_token(token)
-    def _master_pin_ok(self, payload=None, u=None):
-        payload=payload or {}; qs=parse_qs(u.query) if u else {}; pin=str(payload.get("pin") or qs.get("pin",[""])[0] or self.headers.get("X-Admin-Pin", "")); return secrets.compare_digest(pin, str(CONFIG["admin_pin"]))
-
-    def do_GET(self):
-        u=urlparse(self.path); path=u.path
-        if path=="/": return self._page("index.html", {"__VERSION__":VERSION})
-        if path=="/admin": return self._page("admin_home.html", {"__VERSION__":VERSION})
-        if path=="/team": return self._page("team.html", {"__VERSION__":VERSION})
-        if path=="/room-admin": return self._page("admin_room.html", {"__VERSION__":VERSION})
-        if path=="/display": return self._page("display.html", {"__VERSION__":VERSION})
-        if path=="/api/health":
-            db=MANAGER.storage.health(); return self._json(200 if db.get("ok") else 503,{"ok":bool(db.get("ok")),"version":VERSION,"rooms":len(MANAGER.rooms),"database":db,"realtime":"sse","admin_pin_is_default":str(CONFIG["admin_pin"])=="2468"})
-        if path=="/api/team/stream":
-            room,_=self._room_from(u); team=self._team_auth(room,u)
-            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
-            if not team: return self._json(403,{"ok":False,"message":"جلسة الفريق غير صالحة."})
-            return self._sse(room,"team",lambda:room.team_state(team))
-        if path=="/api/admin/stream":
-            room,_=self._room_from(u)
-            if not self._admin_auth(room,u): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
-            return self._sse(room,"admin",room.admin_state)
-        if path=="/api/display_stream":
-            room,_=self._room_from(u)
-            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
-            return self._sse(room,"display",room.display_state)
-        if path=="/api/room/public":
-            room,_=self._room_from(u)
-            return self._json(200, room.public_summary()) if room else self._json(404,{"ok":False,"message":"رمز الغرفة غير صحيح."})
-        if path=="/api/team/state":
-            room,_=self._room_from(u); team=self._team_auth(room,u)
-            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
-            if not team: return self._json(403,{"ok":False,"message":"جلسة الفريق غير صالحة."})
-            return self._json(200,room.team_state(team))
-        if path=="/api/admin/room_state":
-            room,_=self._room_from(u)
-            if not self._admin_auth(room,u): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
-            return self._json(200,room.admin_state())
-        if path=="/api/display_state":
-            room,_=self._room_from(u)
-            if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
-            return self._json(200,room.display_state())
-        if path=="/api/admin/rooms":
-            if not self._master_pin_ok(u=u): return self._json(403,{"ok":False,"message":"رمز المشرف غير صحيح."})
-            return self._json(200,{"ok":True,"rooms":MANAGER.list_rooms()})
-        if path=="/api/admin/log.xlsx":
-            room,_=self._room_from(u)
-            if not self._admin_auth(room,u): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
-            body=build_event_xlsx(room.log_rows); name=f"Vault_{room.code}_Log_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-            return self._send(200,body,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", {"Content-Disposition":f'attachment; filename="{name}"'})
-        return self._send(404,b"Not found")
-
-    def do_POST(self):
-        u=urlparse(self.path); path=u.path; p=self._read_json()
-        if path=="/api/join":
-            room=MANAGER.get(str(p.get("code","")).strip().upper())
-            if not room: return self._json(404,{"ok":False,"message":"رمز الغرفة غير صحيح."})
-            ok,msg,team=room.join_team(str(p.get("team_name","")), str(p.get("existing_token","")))
-            data={"ok":ok,"message":msg}
-            if ok and team: data.update({"room_code":room.code,"room_name":room.name,"team_id":team["id"],"team_name":team["name"],"team_token":team["token"],"team_url":f"/team?code={room.code}&token={team['token']}"})
-            return self._json(200 if ok else 409,data)
-        if path=="/api/admin/create_room":
-            if not self._master_pin_ok(p,u): return self._json(403,{"ok":False,"message":"رمز المشرف غير صحيح."})
-            room=MANAGER.create_room(str(p.get("room_name","")).strip() or "غرفة الخزنة")
-            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة.","room":{"code":room.code,"name":room.name,"admin_token":room.admin_token,"admin_url":f"/room-admin?code={room.code}&token={room.admin_token}","display_url":f"/display?code={room.code}"}})
-        if path=="/api/admin/check_pin":
-            ok=self._master_pin_ok(p,u); return self._json(200 if ok else 403,{"ok":ok,"message":"تم الدخول." if ok else "رمز المشرف غير صحيح."})
-
-        room,_=self._room_from(u,p)
-        if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
-
-        if path.startswith("/api/admin/"):
-            if not self._admin_auth(room,u,p): return self._json(403,{"ok":False,"message":"رابط المشرف غير صالح."})
-            if path=="/api/admin/toggle_join": ok,msg=room.set_join_open(bool(p.get("open")))
-            elif path=="/api/admin/remove_team": ok,msg=room.remove_team(str(p.get("team_id","")))
-            elif path=="/api/admin/start_game": ok,msg=room.start_game()
-            elif path=="/api/admin/start_next": ok,msg=room.start_next()
-            elif path=="/api/admin/close_question": ok,msg=room.close_question_now()
-            elif path=="/api/admin/correct":
-                corr=p.get("corrections")
-                if not isinstance(corr,dict): return self._json(400,{"ok":False,"message":"بيانات التصحيح غير صحيحة."})
-                ok,msg=room.apply_corrections(corr)
-            elif path=="/api/admin/adjust": ok,msg=room.adjust_vault(str(p.get("team_id","")),str(p.get("mode","")),p.get("amount",0))
-            elif path=="/api/admin/reset_round": ok,msg=room.reset_round()
-            else: return self._send(404,b"Not found")
-            return self._json(200 if ok else 409,{"ok":ok,"message":msg})
-
-        team=self._team_auth(room,u,p)
-        if not team: return self._json(403,{"ok":False,"message":"جلسة الفريق غير صالحة."})
-        if path=="/api/team/draft": ok,msg=room.update_draft(team,p.get("draft",""),p.get("revision",0),p.get("question_token",0))
-        elif path=="/api/team/answer": ok,msg=room.submit_answer(team,str(p.get("answer","")))
-        elif path=="/api/team/storage": ok,msg=room.choose_storage(team)
-        else: return self._send(404,b"Not found")
-        return self._json(200 if ok else 409,{"ok":ok,"message":msg})
-
-
-def local_ip():
-    try:
-        s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect(("8.8.8.8",80)); ip=s.getsockname()[0]; s.close(); return ip
-    except Exception: return "127.0.0.1"
-
-
-def main():
-    port=CONFIG["port"]; ip=local_ip(); server=ThreadingHTTPServer(("0.0.0.0",port),Handler); server.daemon_threads=True
-    print("="*72); print(f"{VERSION} — Persistent DB + SSE realtime")
-    print(f"Participant: http://127.0.0.1:{port}/")
-    print(f"Admin:       http://127.0.0.1:{port}/admin")
-    print(f"LAN:         http://{ip}:{port}/")
-    print(f"Database:    {MANAGER.storage.kind}")
-    print("Admin PIN: configured via environment")
-    print("="*72)
-    try: server.serve_forever(poll_interval=.1)
-    except KeyboardInterrupt: pass
-    finally: MANAGER.shutdown(); server.server_close()
-
-if __name__=="__main__": main()
+    def _cookie_token(self):
+        raw=self.headers.get("Cookie", "")
+        for part in raw.split(";"):
