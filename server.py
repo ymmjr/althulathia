@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.41"
+VERSION = "Vault Web v0.42"
 
 
 
@@ -1056,7 +1056,10 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/admin/users":
             user=self._require_superadmin()
             if not user: return self._json(403,{"ok":False,"message":"هذه الصلاحية للمسؤول الرئيسي فقط."})
-            users=MANAGER.storage.list_admin_users(); pending=sum(1 for x in users if x.get("status")=="pending")
+            users=MANAGER.storage.list_admin_users()
+            for x in users:
+                x["email_verified"]=email_auth.is_verified(MANAGER.storage,x)
+            pending=sum(1 for x in users if x.get("status")=="pending" and x.get("email_verified"))
             return self._json(200,{"ok":True,"users":users,"pending_count":pending})
         if path=="/api/team/stream":
             room,_=self._room_from(u); team=self._team_auth(room,u)
@@ -1190,7 +1193,8 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/auth/login":
             email=normalize_email(p.get("email","")); password=str(p.get("password", "")); user=MANAGER.storage.get_admin_user_by_email(email)
             if not user or not verify_password(password,user.get("password_hash","")): return self._json(403,{"ok":False,"message":"البريد أو كلمة المرور غير صحيحة."})
-            if user.get("status")=="email_unverified": return self._json(403,{"ok":False,"message":"يجب تأكيد بريدك الإلكتروني أولًا.","requires_verification":True,"email":email})
+            if email_auth.enabled() and user.get("role")!="super_admin" and user.get("status") in {"email_unverified","pending"} and not email_auth.is_verified(MANAGER.storage,user):
+                return self._json(403,{"ok":False,"message":"يجب تأكيد بريدك الإلكتروني أولًا.","requires_verification":True,"email":email})
             if user.get("status")=="pending": return self._json(403,{"ok":False,"message":"حسابك بانتظار اعتماد المسؤول الرئيسي."})
             if user.get("status")!="approved": return self._json(403,{"ok":False,"message":"هذا الحساب غير مفعل."})
             token=MANAGER.storage.create_admin_session(user["id"]); MANAGER.storage.touch_admin_login(user["id"]); user=MANAGER.storage.get_admin_user_by_id(user["id"])
@@ -1205,7 +1209,7 @@ class Handler(BaseHTTPRequestHandler):
             if not target: return self._json(404,{"ok":False,"message":"الحساب غير موجود."})
             if target.get("role")=="super_admin" and target.get("id")==admin.get("id"): return self._json(409,{"ok":False,"message":"لا يمكن تغيير حالة حساب المسؤول الرئيسي من هنا."})
             if path=="/api/admin/users/approve":
-                if target.get("status")=="email_unverified":
+                if email_auth.enabled() and not email_auth.is_verified(MANAGER.storage,target):
                     return self._json(409,{"ok":False,"message":"لا يمكن اعتماد الحساب قبل تأكيد البريد الإلكتروني."})
                 updated=MANAGER.storage.set_admin_user_status(target_id,"approved",approved_by=admin["id"],role="supervisor")
                 if email_auth.enabled() and email_auth.configured():
