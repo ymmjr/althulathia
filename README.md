@@ -1,19 +1,27 @@
 # الثلاثية الثقافية — الخزنة
 
-Vault Web v0.32 — preliminary web deployment.
+Vault Web v0.40 — preliminary web platform for the cultural committee.
 
-## Runtime
-- Python 3.12
-- SQLite by default
-- PostgreSQL automatically when `DATABASE_URL` is set
-- SSE realtime updates
-- Health check: `/api/health`
+## Features
+- Dynamic multi-room Vault game with SSE realtime updates.
+- Email/password supervisor accounts.
+- One-time Super Admin bootstrap protected by the legacy admin PIN.
+- New supervisor accounts remain pending until approved by the Super Admin.
+- Supervisors can create and operate only their own rooms; Super Admin can access all rooms.
+- Persistent room snapshots, event logs and account sessions.
+- Room history/archive with full event log, leaderboard and Excel export.
+- Branded UI using the approved Althulathia visual palette.
+
+## Persistence
+- SQLite by default.
+- Set `VAULT_DB_PATH=/data/vault_state.db` when using a persistent Railway volume.
+- PostgreSQL is supported automatically when `DATABASE_URL` is set.
 
 ## Important environment variables
-- `VAULT_ADMIN_PIN` — supervisor PIN
-- `DATABASE_URL` — production PostgreSQL connection string (recommended)
-- `VAULT_DB_PATH` — SQLite path when PostgreSQL is not configured
-- `VAULT_LOG_DIR` — optional local JSONL log directory
+- `VAULT_ADMIN_PIN` — used only for the one-time Super Admin bootstrap after v0.40.
+- `VAULT_DB_PATH` — SQLite database path.
+- `DATABASE_URL` — optional PostgreSQL connection string.
+- `VAULT_LOG_DIR` — optional JSONL backup directory.
 
-## Data
-Questions and settings are stored in `Questions.json` so they can be edited and reviewed directly in GitHub.
+## Health check
+`/api/health`
