@@ -1,0 +1,82 @@
+{
+  "settings": {
+    "game_title": "الخزنة",
+    "question_seconds": 10,
+    "storage_seconds": 5,
+    "max_multiplier": 128
+  },
+  "questions": [
+    {
+      "number": 1,
+      "question": "ما عاصمة دولة الكويت؟",
+      "correct_answer": "مدينة الكويت",
+      "difficulty": 1
+    },
+    {
+      "number": 2,
+      "question": "كم عدد أيام الأسبوع؟",
+      "correct_answer": "7",
+      "difficulty": 1
+    },
+    {
+      "number": 3,
+      "question": "ما الكوكب المعروف بالكوكب الأحمر؟",
+      "correct_answer": "المريخ",
+      "difficulty": 2
+    },
+    {
+      "number": 4,
+      "question": "كم عدد أضلاع المثلث؟",
+      "correct_answer": "3",
+      "difficulty": 1
+    },
+    {
+      "number": 5,
+      "question": "ما أكبر محيط في العالم؟",
+      "correct_answer": "المحيط الهادئ",
+      "difficulty": 2
+    },
+    {
+      "number": 6,
+      "question": "في أي قارة تقع مصر؟",
+      "correct_answer": "أفريقيا",
+      "difficulty": 1
+    },
+    {
+      "number": 7,
+      "question": "ما اسم العملية التي تصنع بها النباتات غذاءها؟",
+      "correct_answer": "البناء الضوئي",
+      "difficulty": 3
+    },
+    {
+      "number": 8,
+      "question": "كم عدد أشهر السنة الميلادية؟",
+      "correct_answer": "12",
+      "difficulty": 1
+    },
+    {
+      "number": 9,
+      "question": "ما أسرع حيوان بري؟",
+      "correct_answer": "الفهد",
+      "difficulty": 2
+    },
+    {
+      "number": 10,
+      "question": "ما العنصر الذي رمزه الكيميائي O؟",
+      "correct_answer": "الأكسجين",
+      "difficulty": 2
+    },
+    {
+      "number": 11,
+      "question": "كم تساوي 8 × 7؟",
+      "correct_answer": "56",
+      "difficulty": 1
+    },
+    {
+      "number": 12,
+      "question": "ما اللغة الرسمية في البرازيل؟",
+      "correct_answer": "البرتغالية",
+      "difficulty": 3
+    }
+  ]
+}
