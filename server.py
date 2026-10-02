@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.42"
+VERSION = "Vault Web v0.43"
 
 
 
@@ -1053,6 +1053,17 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/auth/status":
             user=self._current_user(); needs_setup=not MANAGER.storage.superadmin_exists()
             return self._json(200,{"ok":True,"needs_setup":needs_setup,"logged_in":bool(user),"user":public_user(user),"email_auth":email_auth.status_payload()})
+        if path=="/api/system/email-test":
+            qs=parse_qs(u.query); supplied=str(qs.get("token",[""])[0]); expected=os.environ.get("EMAIL_TEST_SECRET","")
+            if not expected or not supplied or not secrets.compare_digest(supplied,expected): return self._send(404,b"Not found")
+            to_email=normalize_email(os.environ.get("EMAIL_TEST_TO",""))
+            if not EMAIL_RE.match(to_email): return self._json(503,{"ok":False,"message":"Test destination is not configured."})
+            try:
+                result=email_auth.send_test_email(to_email)
+                return self._json(200,{"ok":True,"provider":email_auth.delivery_provider(),"result":result})
+            except Exception as e:
+                print(f"[EMAIL] self-test failed: {e}")
+                return self._json(502,{"ok":False,"provider":email_auth.delivery_provider(),"message":str(e)[:600]})
         if path=="/api/admin/users":
             user=self._require_superadmin()
             if not user: return self._json(403,{"ok":False,"message":"هذه الصلاحية للمسؤول الرئيسي فقط."})
