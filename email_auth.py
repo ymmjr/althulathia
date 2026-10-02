@@ -5,10 +5,14 @@ import html
 import json
 import os
 import secrets
+import smtplib
+import ssl
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime
+from email.message import EmailMessage
+from email.utils import parseaddr
 from urllib.parse import quote
 
 OTP_TTL_SECONDS = 10 * 60
@@ -33,6 +37,25 @@ def _resend_api_key() -> str:
     return os.environ.get("RESEND_API_KEY", "").strip()
 
 
+def _smtp_host() -> str:
+    return os.environ.get("SMTP_HOST", "").strip()
+
+
+def _smtp_port() -> int:
+    try:
+        return int(os.environ.get("SMTP_PORT", "465"))
+    except Exception:
+        return 465
+
+
+def _smtp_username() -> str:
+    return os.environ.get("SMTP_USERNAME", "").strip()
+
+
+def _smtp_password() -> str:
+    return os.environ.get("SMTP_PASSWORD", "").strip()
+
+
 def _email_from() -> str:
     return os.environ.get("EMAIL_FROM", "الثلاثية الثقافية <no-reply@playalthulathia.com>").strip()
 
@@ -41,14 +64,23 @@ def _token_secret() -> str:
     return os.environ.get("EMAIL_TOKEN_SECRET", "").strip()
 
 
+def delivery_provider() -> str:
+    if _resend_api_key():
+        return "resend"
+    if _smtp_host() and _smtp_username() and _smtp_password():
+        return "smtp"
+    return "none"
+
+
 def configured() -> bool:
-    return bool(_resend_api_key() and _email_from() and _token_secret())
+    return bool(_token_secret() and _email_from() and delivery_provider() != "none")
 
 
 def status_payload() -> dict:
     return {
         "enabled": enabled(),
         "configured": configured(),
+        "provider": delivery_provider(),
         "support_email": support_email(),
     }
 
@@ -63,12 +95,49 @@ def init_schema(storage) -> None:
                 "attempts INTEGER NOT NULL, resend_after BIGINT NOT NULL)"
             )
             cur.execute(
+                "CREATE TABLE IF NOT EXISTS admin_email_verified ("
+                "user_id TEXT PRIMARY KEY, verified_at TEXT NOT NULL)"
+            )
+            cur.execute(
                 "CREATE TABLE IF NOT EXISTS admin_password_resets ("
                 "token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, "
                 "expires_at BIGINT NOT NULL, used_at BIGINT)"
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_password_resets_user ON admin_password_resets(user_id)")
             if storage.kind == "sqlite":
+                con.commit()
+
+
+def is_verified(storage, user: dict | None) -> bool:
+    if not user:
+        return False
+    if user.get("role") == "super_admin" or user.get("status") == "approved":
+        return True
+    row = storage._fetchone(
+        "SELECT verified_at FROM admin_email_verified WHERE user_id=%s",
+        "SELECT verified_at FROM admin_email_verified WHERE user_id=?",
+        (user["id"],),
+    )
+    return bool(row)
+
+
+def mark_verified(storage, user_id: str) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    with storage._lock:
+        with storage._connect() as con:
+            cur = con.cursor()
+            if storage.kind == "postgres":
+                cur.execute(
+                    "INSERT INTO admin_email_verified(user_id,verified_at) VALUES (%s,%s) "
+                    "ON CONFLICT(user_id) DO UPDATE SET verified_at=EXCLUDED.verified_at",
+                    (user_id, now),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO admin_email_verified(user_id,verified_at) VALUES (?,?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET verified_at=excluded.verified_at",
+                    (user_id, now),
+                )
                 con.commit()
 
 
@@ -83,9 +152,7 @@ def _reset_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _send_email(to_email: str, subject: str, html_body: str, text_body: str = "") -> dict:
-    if not configured():
-        raise RuntimeError("Email delivery is not configured")
+def _send_via_resend(to_email: str, subject: str, html_body: str, text_body: str) -> dict:
     payload = {
         "from": _email_from(),
         "to": [to_email],
@@ -94,28 +161,68 @@ def _send_email(to_email: str, subject: str, html_body: str, text_body: str = ""
     }
     if text_body:
         payload["text"] = text_body
-    reply_to = support_email()
-    if reply_to:
-        payload["reply_to"] = reply_to
+    if support_email():
+        payload["reply_to"] = support_email()
     req = urllib.request.Request(
         "https://api.resend.com/emails",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {_resend_api_key()}",
             "Content-Type": "application/json",
-            "User-Agent": "Althulathia-Vault/0.41",
+            "User-Agent": "Althulathia-Vault/0.42",
         },
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=12) as response:
             raw = response.read().decode("utf-8")
-            return json.loads(raw or "{}")
+            return {"provider": "resend", **json.loads(raw or "{}")}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Resend HTTP {exc.code}: {detail[:500]}") from exc
     except Exception as exc:
         raise RuntimeError(f"Resend delivery failed: {exc}") from exc
+
+
+def _send_via_smtp(to_email: str, subject: str, html_body: str, text_body: str) -> dict:
+    display_name, sender_email = parseaddr(_email_from())
+    if not sender_email:
+        sender_email = _email_from()
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = _email_from()
+    msg["To"] = to_email
+    if support_email():
+        msg["Reply-To"] = support_email()
+    msg.set_content(text_body or "رسالة من منصة الثلاثية الثقافية.")
+    msg.add_alternative(html_body, subtype="html")
+    host, port = _smtp_host(), _smtp_port()
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=15) as smtp:
+                smtp.login(_smtp_username(), _smtp_password())
+                smtp.send_message(msg, from_addr=sender_email, to_addrs=[to_email])
+        else:
+            with smtplib.SMTP(host, port, timeout=15) as smtp:
+                smtp.ehlo()
+                smtp.starttls(context=ssl.create_default_context())
+                smtp.ehlo()
+                smtp.login(_smtp_username(), _smtp_password())
+                smtp.send_message(msg, from_addr=sender_email, to_addrs=[to_email])
+        return {"provider": "smtp", "accepted": True}
+    except Exception as exc:
+        raise RuntimeError(f"SMTP delivery failed: {exc}") from exc
+
+
+def _send_email(to_email: str, subject: str, html_body: str, text_body: str = "") -> dict:
+    if not configured():
+        raise RuntimeError("Email delivery is not configured")
+    provider = delivery_provider()
+    if provider == "resend":
+        return _send_via_resend(to_email, subject, html_body, text_body)
+    if provider == "smtp":
+        return _send_via_smtp(to_email, subject, html_body, text_body)
+    raise RuntimeError("No email provider configured")
 
 
 def _shell(title: str, inner: str) -> str:
@@ -245,9 +352,9 @@ def verify_otp(storage, email: str, code: str) -> tuple[bool, str, dict | None]:
     user = storage.get_admin_user_by_email(email)
     if not user:
         return False, "رمز التحقق غير صحيح أو انتهت صلاحيته.", None
-    if user.get("status") in {"pending", "approved"}:
+    if is_verified(storage, user):
         return True, "تم تأكيد البريد مسبقًا.", user
-    if user.get("status") != "email_unverified":
+    if user.get("status") not in {"email_unverified", "pending"}:
         return False, "هذا الحساب غير متاح للتحقق.", None
     row = storage._fetchone(
         "SELECT otp_hash,expires_at,attempts FROM admin_email_otps WHERE user_id=%s",
@@ -273,6 +380,7 @@ def verify_otp(storage, email: str, code: str) -> tuple[bool, str, dict | None]:
                     cur.execute("UPDATE admin_email_otps SET attempts=attempts+1 WHERE user_id=?", (user["id"],))
                     con.commit()
         return False, "رمز التحقق غير صحيح.", None
+    mark_verified(storage, user["id"])
     updated = storage.set_admin_user_status(user["id"], "pending", approved_by=None, role="supervisor")
     with storage._lock:
         with storage._connect() as con:
@@ -291,8 +399,12 @@ def verify_otp(storage, email: str, code: str) -> tuple[bool, str, dict | None]:
 
 def resend_otp(storage, email: str) -> tuple[bool, str, dict]:
     user = storage.get_admin_user_by_email(email)
-    if not user or user.get("status") != "email_unverified":
+    if not user or is_verified(storage, user):
         return True, "إذا كان الحساب يحتاج تأكيدًا فسيتم إرسال رمز جديد.", {}
+    if user.get("status") not in {"email_unverified", "pending"}:
+        return True, "إذا كان الحساب يحتاج تأكيدًا فسيتم إرسال رمز جديد.", {}
+    if user.get("status") == "pending":
+        user = storage.set_admin_user_status(user["id"], "email_unverified", approved_by=None, role="supervisor")
     result = issue_otp(storage, user, enforce_cooldown=True)
     if not result.get("ok"):
         return False, result.get("message", "تعذر إعادة الإرسال."), result
@@ -304,6 +416,8 @@ def request_password_reset(storage, email: str) -> None:
         return
     user = storage.get_admin_user_by_email(email)
     if not user or user.get("status") not in {"approved", "pending"}:
+        return
+    if user.get("status") == "pending" and not is_verified(storage, user):
         return
     token = secrets.token_urlsafe(32)
     token_hash = _reset_hash(token)
