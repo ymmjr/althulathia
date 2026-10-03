@@ -1272,13 +1272,14 @@ class Handler(BaseHTTPRequestHandler):
         u=urlparse(self.path); path=u.path
         if path=="/": return self._page("index.html", {"__VERSION__":VERSION})
         if path=="/admin": return self._page("admin_home.html", {"__VERSION__":VERSION})
-        if path=="/archive": return self._page("archive.html", {"__VERSION__":VERSION})
+        if path in {"/admin/dashboard","/admin/rooms","/admin/accounts","/admin/archive","/admin/settings"}: return self._page("admin_portal.html", {"__VERSION__":VERSION})
+        if path in {"/archive","/admin/archive/room"}: return self._page("archive.html", {"__VERSION__":VERSION})
         if path=="/brand.svg":
             body=(WEB/"brand.svg").read_bytes(); return self._send(200,body,"image/svg+xml; charset=utf-8")
         if path=="/brand.webp":
             body=(WEB/"brand.webp").read_bytes(); return self._send(200,body,"image/webp")
         if path=="/team": return self._page("team.html", {"__VERSION__":VERSION})
-        if path=="/room-admin": return self._page("admin_room.html", {"__VERSION__":VERSION})
+        if path in {"/room-admin","/admin/room"}: return self._page("admin_room.html", {"__VERSION__":VERSION})
         if path=="/display": return self._page("display.html", {"__VERSION__":VERSION})
         if path=="/api/health":
             db=MANAGER.storage.health(); return self._json(200 if db.get("ok") else 503,{"ok":bool(db.get("ok")),"version":VERSION,"rooms":len(MANAGER.rooms),"database":db,"realtime":"sse","admin_pin_is_default":str(CONFIG["admin_pin"])=="2468"})
@@ -1536,7 +1537,7 @@ class Handler(BaseHTTPRequestHandler):
                 owner_user_id=user["id"], owner_name=user.get("name",""), owner_email=user.get("email",""),
                 room_type=room_type, question_pack=pack,
             )
-            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة الخاصة وتثبيت نسخة ملف الجولة." if room_type=="private" else "تم إنشاء الغرفة.","room":{"code":room.code,"name":room.name,"room_type":room.room_type,"question_pack_label":room.question_pack_label,"question_pack_version":room.question_pack_version,"admin_url":f"/room-admin?code={room.code}","display_url":f"/display?code={room.code}"}})
+            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة الخاصة وتثبيت نسخة ملف الجولة." if room_type=="private" else "تم إنشاء الغرفة.","room":{"code":room.code,"name":room.name,"room_type":room.room_type,"question_pack_label":room.question_pack_label,"question_pack_version":room.question_pack_version,"admin_url":f"/admin/room?code={room.code}","display_url":f"/display?code={room.code}"}})
         if path=="/api/admin/check_pin":
             ok=(not MANAGER.storage.superadmin_exists()) and self._master_pin_ok(p,u); return self._json(200 if ok else 403,{"ok":ok,"message":"الرمز صالح للتهيئة الأولى." if ok else "الرمز غير صالح أو تم إنشاء المسؤول الرئيسي مسبقًا."})
 
