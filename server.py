@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.62"
+VERSION = "Vault Web v0.63"
 
 
 
@@ -1181,7 +1181,7 @@ MANAGER = RoomManager(CONFIG, QUESTIONS)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.62"
+    server_version = "VaultWeb/0.63"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")

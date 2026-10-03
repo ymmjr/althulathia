@@ -17,11 +17,11 @@ linear-gradient(120deg,transparent 0 18%,#ffffff07 18% 26%,transparent 26% 62%,#
 linear-gradient(30deg,transparent 0 65%,#1698E210 65% 74%,transparent 74%);z-index:0}
 body:after{width:32vw;height:32vw;right:-12vw;bottom:-18vw;background:#F58D2725;clip-path:polygon(100% 0,0 100%,100% 100%);z-index:0}
 .screen{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:2.2vh;padding:2.3vh 3vw 2.5vh;position:relative;z-index:1}
-.top{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);grid-template-areas:"question timer logo";align-items:center;gap:18px}
-.logoWrap{grid-area:logo;justify-self:end;display:grid;place-items:center}.brand{width:min(210px,15vw);max-height:14vh;object-fit:contain;background:#fff;border-radius:18px;padding:7px;box-shadow:0 12px 32px #0003}
-.questionCluster{grid-area:question;justify-self:start;min-width:0}.timerCluster{grid-area:timer;justify-self:center}
-.counter,.timerWrap{border:1px solid #ffffff3b;background:#042E50B8;backdrop-filter:blur(10px);border-radius:15px;padding:12px 18px;font-weight:900;box-shadow:0 9px 22px #001b2f44}
-.counter{font-size:clamp(16px,1.45vw,27px);text-align:center;min-width:180px}.timerWrap{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:210px;justify-content:center;padding:10px 24px}
+.top{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);grid-template-areas:"logo timer question";align-items:center;gap:18px}
+.headerTile{height:96px;border:1px solid #ffffff3b;background:#042E50B8;backdrop-filter:blur(10px);border-radius:18px;box-shadow:0 9px 22px #001b2f44;display:flex;align-items:center;justify-content:center}
+.logoWrap{grid-area:logo;justify-self:start;width:min(245px,100%);padding:10px 16px}.brand{width:min(190px,13vw);max-height:72px;object-fit:contain;background:#fff;border-radius:13px;padding:5px}
+.questionCluster{grid-area:question;justify-self:end;width:min(245px,100%);min-width:0}.timerCluster{grid-area:timer;justify-self:center}
+.counter{font-size:clamp(17px,1.45vw,27px);font-weight:1000;text-align:center;padding:12px 18px;color:#fff;line-height:1.35}.timerWrap{min-width:220px;padding:9px 26px;display:flex;flex-direction:column;align-items:center;gap:3px;font-weight:900}
 .timerLabel{font-size:clamp(12px,1vw,17px);color:#D8EAF3;font-weight:900}.timer{font-size:clamp(42px,4.5vw,78px);font-weight:1000;color:#fff;direction:ltr;unicode-bidi:isolate;line-height:.95;letter-spacing:.04em}
 .timerWrap.active{background:linear-gradient(135deg,#F58D27,#E76D12);border-color:#FFB56F;box-shadow:0 12px 30px #E76D1238}
 .center{display:flex;align-items:center;justify-content:center;min-height:0}.questionFrame{width:min(1160px,84vw);position:relative}
@@ -38,15 +38,15 @@ body:after{width:32vw;height:32vw;right:-12vw;bottom:-18vw;background:#F58D2725;
 .rank{grid-area:rank;align-self:center;font-size:clamp(24px,2vw,38px);font-weight:1000;color:#fff;opacity:.8}.name{grid-area:name;font-size:clamp(17px,1.55vw,27px);font-weight:1000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.safe{grid-area:score;font-size:clamp(24px,2.5vw,43px);font-weight:1000;line-height:1}.risk{grid-area:detail;color:#FFE1C2;font-size:clamp(12px,1vw,17px);font-weight:800}
 .empty{grid-column:1/-1;text-align:center;padding:20px;color:#D8EAF3}
 @media(max-width:1150px){.rows{grid-template-columns:repeat(2,1fr)}.row{min-height:95px}.questionPanel{min-height:28vh}.brand{width:150px}.screen{gap:1.5vh}}
-@media(max-width:700px){.top{grid-template-columns:1fr auto 1fr;gap:8px}.brand{width:100px;max-height:9vh}.counter{min-width:0;font-size:13px;padding:8px 9px}.timerWrap{min-width:112px;padding:7px 11px}.timer{font-size:38px}.timerLabel{font-size:10px}.questionFrame{width:92vw}.questionPanel{min-height:26vh;border-width:3px}.rows{grid-template-columns:1fr 1fr;gap:7px}.row{padding:9px}.subline{bottom:-38px}}
+@media(max-width:700px){.top{grid-template-columns:1fr auto 1fr;gap:8px}.headerTile{height:70px;border-radius:13px}.logoWrap{width:100%;padding:7px}.brand{width:90px;max-height:54px;border-radius:9px}.questionCluster{width:100%}.counter{font-size:12px;padding:7px;line-height:1.3}.timerWrap{min-width:104px;padding:6px 10px}.timer{font-size:36px}.timerLabel{font-size:9px}.questionFrame{width:92vw}.questionPanel{min-height:26vh;border-width:3px}.rows{grid-template-columns:1fr 1fr;gap:7px}.row{padding:9px}.subline{bottom:-38px}}
 </style>
 </head>
 <body>
 <main class="screen">
   <header class="top">
-    <div class="logoWrap"><img class="brand" src="/brand.webp" alt="الثلاثية الثقافية"></div>
-    <div class="timerCluster"><div id="timerWrap" class="timerWrap"><span class="timerLabel">الوقت المتبقي</span><span id="timer" class="timer">00</span></div></div>
-    <div class="questionCluster"><div id="counter" class="counter">بانتظار السؤال</div></div>
+    <div class="logoWrap headerTile"><img class="brand" src="/brand.webp" alt="الثلاثية الثقافية"></div>
+    <div class="timerCluster"><div id="timerWrap" class="timerWrap headerTile"><span class="timerLabel">الوقت المتبقي</span><span id="timer" class="timer">00</span></div></div>
+    <div class="questionCluster headerTile"><div id="counter" class="counter">بانتظار السؤال</div></div>
   </header>
   <section class="center">
     <div class="questionFrame">
