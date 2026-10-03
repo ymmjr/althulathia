@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.60"
+VERSION = "Vault Web v0.61"
 
 
 
@@ -743,7 +743,7 @@ class GameRoom:
         with self.lock:
             self.archived_at = None
             self._init_round(clear_scores=True)
-            self._event("SYSTEM", "ROUND_RESET", note="إعادة جميع الفرق إلى Lobby وتصفير الجولة")
+            self._event("SYSTEM", "ROUND_RESET", note="إعادة جميع الفرق إلى الانتظار وتصفير الجولة")
             self._changed(team=True, admin=True, display=True)
             return True, "تمت إعادة تهيئة الجولة وفتح الانضمام."
 
@@ -776,7 +776,7 @@ class GameRoom:
                 self.phase = "waiting_correction"
                 self.question_deadline_ms = 0
                 self.correction_ready_ms = self.closed_question_deadline_ms + 400
-                self._event("SYSTEM", "QUESTION_TIME_ENDED", note="انتهى الوقت واعتمد آخر Draft لغير المرسلين")
+                self._event("SYSTEM", "QUESTION_TIME_ENDED", note="انتهى الوقت واعتمد آخر مسودة لغير المرسلين")
                 self._changed(team=True, admin=True, display=True)
             if self.phase == "storage_open" and now >= self.storage_deadline_ms:
                 self._finalize_storage()
@@ -813,7 +813,7 @@ class GameRoom:
             self.phase = "waiting_correction"
             self.question_deadline_ms = 0
             self.correction_ready_ms = now + 300
-            self._event("SYSTEM", "QUESTION_TIME_ENDED_MANUALLY", note="أنهى المشرف وقت الإجابة واعتمد آخر Draft")
+            self._event("SYSTEM", "QUESTION_TIME_ENDED_MANUALLY", note="أنهى المشرف وقت الإجابة واعتمد آخر مسودة")
             self._changed(team=True, admin=True, display=True)
             return True, "تم إنهاء وقت السؤال."
 
