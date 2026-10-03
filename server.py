@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.61"
+VERSION = "Vault Web v0.62"
 
 
 
@@ -1181,7 +1181,7 @@ MANAGER = RoomManager(CONFIG, QUESTIONS)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.50"
+    server_version = "VaultWeb/0.62"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1248,6 +1248,13 @@ class Handler(BaseHTTPRequestHandler):
         cookie = "vault_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
         if secure: cookie += "; Secure"
         return cookie
+    def _public_base_url(self):
+        configured = os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+        if configured:
+            return configured
+        proto = self.headers.get("X-Forwarded-Proto", "http").split(",")[0].strip() or "http"
+        host = self.headers.get("Host", f"127.0.0.1:{CONFIG['port']}").strip()
+        return f"{proto}://{host}"
     def _admin_auth(self, room, u, payload=None):
         if not room: return False
         user=self._current_user()
@@ -1334,7 +1341,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse(room,"display",room.display_state)
         if path=="/api/room/public":
             room,_=self._room_from(u)
-            return self._json(200, room.public_summary()) if room else self._json(404,{"ok":False,"message":"رمز الغرفة غير صحيح."})
+            if not room:
+                return self._json(404,{"ok":False,"message":"رمز الغرفة غير صحيح."})
+            data=room.public_summary()
+            data["join_url"]=f"{self._public_base_url()}/?code={room.code}"
+            return self._json(200,data)
+        if path=="/api/room/qr":
+            room,_=self._room_from(u)
+            if not room:
+                return self._json(404,{"ok":False,"message":"رمز الغرفة غير صحيح."})
+            try:
+                import io
+                import qrcode
+                import qrcode.image.svg
+                target=f"{self._public_base_url()}/?code={room.code}"
+                qr=qrcode.QRCode(
+                    version=None,
+                    error_correction=qrcode.constants.ERROR_CORRECT_M,
+                    box_size=10,
+                    border=2,
+                )
+                qr.add_data(target)
+                qr.make(fit=True)
+                img=qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+                buf=io.BytesIO()
+                img.save(buf)
+                return self._send(200,buf.getvalue(),"image/svg+xml; charset=utf-8")
+            except Exception as e:
+                print(f"[QR] generation failed for {room.code}: {e}")
+                return self._json(500,{"ok":False,"message":"تعذر إنشاء رمز الدخول."})
         if path=="/api/team/state":
             room,_=self._room_from(u); team=self._team_auth(room,u)
             if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
