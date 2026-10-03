@@ -1,24 +1,64 @@
-<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><link rel="icon" type="image/webp" href="/brand.webp">
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/webp" href="/brand.webp">
 <link rel="apple-touch-icon" href="/brand.webp">
-<meta name="theme-color" content="#1066AB">
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="الثلاثية الثقافية">
-<meta property="og:title" content="الثلاثية الثقافية">
-<meta property="og:description" content="منصة السمر الثقافي — مهرجان الدرع الحصين">
-<meta property="og:image" content="https://vault-web-production-52cf.up.railway.app/brand.webp">
-<meta property="og:image:alt" content="شعار الثلاثية الثقافية">
-<meta property="og:url" content="https://vault-web-production-52cf.up.railway.app/">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="الثلاثية الثقافية">
-<meta name="twitter:description" content="منصة السمر الثقافي — مهرجان الدرع الحصين">
-<meta name="twitter:image" content="https://vault-web-production-52cf.up.railway.app/brand.webp"><meta name="viewport" content="width=device-width,initial-scale=1"><title>الخزنة — شاشة العرض</title><style>
-:root{font-family:Tahoma,Arial,sans-serif;--gold:#F4D126;--deep:#080B2A;--purple:#8B5CF6;--blue:#334CE0;--cyan:#17C9D8}*{box-sizing:border-box}body{margin:0;overflow:hidden;background:radial-gradient(circle at 50% -20%,#36266d,#080B2A 64%);color:#fff;height:100vh}.screen{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;padding:3vh 4vw;gap:2vh}.top{display:flex;justify-content:space-between;align-items:center}.brand{font-size:clamp(28px,3.2vw,60px);font-weight:1000}.counter{background:#ffffff12;border:1px solid #ffffff25;border-radius:999px;padding:.7em 1.2em;font-size:clamp(15px,1.5vw,27px);font-weight:900}.center{display:grid;grid-template-rows:auto 1fr auto;align-items:center;min-height:0}.timer{text-align:center;font-size:clamp(60px,8vw,138px);font-weight:1000;color:var(--gold);line-height:1;min-height:1em}.headline{text-align:center;display:flex;align-items:center;justify-content:center;font-size:clamp(30px,4vw,68px);line-height:1.55;font-weight:1000;padding:0 4vw;overflow-wrap:anywhere}.subline{text-align:center;font-size:clamp(18px,2vw,34px);color:#AEB6DC;font-weight:800}.board{background:#11163acc;border:1px solid #ffffff25;border-radius:22px;padding:1.2vw 1.6vw;max-height:29vh;overflow:hidden}.boardTitle{display:flex;justify-content:space-between;color:#F7F8FF;font-weight:900;margin-bottom:8px}.rows{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 24px}.row{display:grid;grid-template-columns:48px 1fr auto auto;gap:10px;align-items:center;border-top:1px solid #ffffff12;padding:7px 0;font-size:clamp(14px,1.3vw,23px)}.rank{color:var(--gold);font-weight:1000}.name{font-weight:900}.safe,.risk{white-space:nowrap}.risk{color:#17C9D8}@media(max-width:900px){.screen{padding:2vh 3vw}.rows{grid-template-columns:1fr}.board{max-height:34vh}.headline{font-size:clamp(24px,5vw,50px)}}
-</style><style id="official-althulathia-theme">
-:root{--gold:#F58D27;--deep:#06385F;--purple:#1066AB;--blue:#1066AB;--cyan:#F58D27}
-body{background:radial-gradient(circle at 50% -20%,#1679B9 0,#073F69 48%,#052E4D 100%)!important;color:#fff!important}
-.brand img{width:185px!important;height:auto!important;max-height:150px!important;object-fit:contain!important;border-radius:14px!important;background:#fff!important;padding:6px!important}
-.counter{background:#ffffff16!important;border-color:#ffffff35!important}
-.timer,.rank{color:#F58D27!important}.subline{color:#D8E9F3!important}.risk{color:#FFB066!important}
-.board{background:#06385FDD!important;border-color:#ffffff30!important}.boardTitle{color:#fff!important}.row{border-color:#ffffff18!important}</style></head><body><main class="screen"><header class="top"><div class="brand"><img src="/brand.webp" alt="الثلاثية الثقافية" style="width:260px;max-height:86px;object-fit:contain;border-radius:14px"></div><div id="counter" class="counter">بانتظار الغرفة</div></header><section class="center"><div id="timer" class="timer">0</div><div id="headline" class="headline">بانتظار البداية</div><div id="subline" class="subline"></div></section><footer class="board"><div class="boardTitle"><span>الترتيب</span><span id="count">0 فريق</span></div><div id="rows" class="rows"></div></footer></main><script>
-const CODE=(new URLSearchParams(location.search).get('code')||'').toUpperCase();let state=null,offset=0,samples=[];const $=id=>document.getElementById(id),origin=performance.timeOrigin||(Date.now()-performance.now());function nowServer(){return origin+performance.now()+offset}function left(d){return Math.max(0,Math.ceil((Number(d||0)-nowServer())/1000))}function sync(server,t0,t1){const s={rtt:t1-t0,offset:Number(server)-(origin+(t0+t1)/2)};samples.push(s);if(samples.length>16)samples.shift();const best=samples.reduce((a,b)=>b.rtt<a.rtt?b:a,samples[0]);offset=samples.length===1?best.offset:offset*.65+best.offset*.35}function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}function render(){if(!state)return;$('counter').textContent=(state.question_no?'السؤال '+state.question_no+' / '+state.total_questions:state.room_name+' · '+state.room_code);$('headline').textContent=state.headline;$('subline').textContent=state.subline;$('count').textContent=state.team_count+' فريقًا';$('timer').textContent=state.phase==='question_open'?left(state.question_deadline_ms):state.phase==='storage_open'?left(state.storage_deadline_ms):0;$('rows').innerHTML=state.leaderboard.map(x=>`<div class="row"><span class="rank">${x.rank}</span><span class="name">${esc(x.name)}</span><span class="safe">الخزنة ${x.vault}</span><span class="risk">خطر ${x.risk}</span></div>`).join('')||'<div>بانتظار انضمام الفرق...</div>'}async function refresh(){try{const t0=performance.now(),r=await fetch('/api/display_state?code='+encodeURIComponent(CODE),{cache:'no-store'}),d=await r.json(),t1=performance.now();if(!r.ok){$('counter').textContent='رمز غير صحيح';$('headline').textContent=d.message||'الغرفة غير موجودة';return}sync(d.server_now_ms,t0,t1);state=d;render()}catch(e){$('counter').textContent='OFFLINE'}}function startStream(){const url='/api/display_stream?code='+encodeURIComponent(CODE),es=new EventSource(url);es.addEventListener('state',e=>{try{const d=JSON.parse(e.data),t=performance.now();sync(d.server_now_ms,t,t);state=d;render()}catch(_){}});es.onerror=()=>{$('counter').textContent=state?(state.room_name+' · إعادة الاتصال…'):'إعادة الاتصال…'}}setInterval(()=>{if(state)render()},50);refresh().then(startStream);setInterval(refresh,30000);
+<meta name="theme-color" content="#073F69">
+<title>الخزنة — شاشة العرض</title>
+<style>
+:root{font-family:"Segoe UI",Tahoma,Arial,sans-serif;--blue:#1066AB;--blue2:#1685D2;--navy:#052F52;--orange:#F58D27;--white:#fff;--muted:#CFE4EF}
+*{box-sizing:border-box}body{margin:0;width:100vw;height:100vh;overflow:hidden;color:#fff;background:
+radial-gradient(circle at 50% 0,#1685D2 0,#0B5C96 32%,#063D67 63%,#042B49 100%);position:relative}
+body:before,body:after{content:"";position:absolute;pointer-events:none}
+body:before{inset:0;background:
+linear-gradient(120deg,transparent 0 18%,#ffffff07 18% 26%,transparent 26% 62%,#F58D2710 62% 69%,transparent 69%),
+linear-gradient(30deg,transparent 0 65%,#1698E210 65% 74%,transparent 74%);z-index:0}
+body:after{width:32vw;height:32vw;right:-12vw;bottom:-18vw;background:#F58D2725;clip-path:polygon(100% 0,0 100%,100% 100%);z-index:0}
+.screen{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:2.2vh;padding:2.3vh 3vw 2.5vh;position:relative;z-index:1}
+.top{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:18px}
+.infoCluster{display:flex;gap:10px;align-items:center}.infoCluster.left{justify-content:flex-start}
+.logoWrap{display:grid;place-items:center}.brand{width:min(210px,15vw);max-height:14vh;object-fit:contain;background:#fff;border-radius:18px;padding:7px;box-shadow:0 12px 32px #0003}
+.counter,.timerWrap{border:1px solid #ffffff3b;background:#042E50B8;backdrop-filter:blur(10px);border-radius:15px;padding:12px 18px;font-weight:900;box-shadow:0 9px 22px #001b2f44}
+.counter{font-size:clamp(16px,1.45vw,27px)}.timerWrap{display:flex;align-items:center;gap:10px;min-width:170px;justify-content:center}
+.timerLabel{font-size:clamp(12px,1vw,17px);color:#D8EAF3}.timer{font-size:clamp(28px,3vw,54px);font-weight:1000;color:#fff;direction:ltr;line-height:1}
+.timerWrap.active{background:linear-gradient(135deg,#F58D27,#E76D12);border-color:#FFB56F}
+.center{display:flex;align-items:center;justify-content:center;min-height:0}.questionFrame{width:min(1160px,84vw);position:relative}
+.questionFrame:before,.questionFrame:after{content:"";position:absolute;top:28%;width:92px;height:92px;z-index:0}
+.questionFrame:before{right:-48px;background:#F58D27;clip-path:polygon(100% 0,0 50%,100% 100%);opacity:.95}
+.questionFrame:after{left:-48px;background:#21A2E8;clip-path:polygon(0 0,100% 50%,0 100%);opacity:.95}
+.questionPanel{position:relative;z-index:1;background:linear-gradient(180deg,#FFFFFF,#F7FBFE);border:5px solid #E4F2F9;border-radius:28px;min-height:32vh;padding:4.5vh 5vw;display:flex;align-items:center;justify-content:center;box-shadow:0 24px 55px #001D3355,inset 0 0 0 2px #A8D3E9;color:#092E52;text-align:center}
+.headline{font-size:clamp(34px,4.2vw,74px);line-height:1.45;font-weight:1000;overflow-wrap:anywhere}.subline{position:absolute;bottom:-48px;left:10%;right:10%;text-align:center;font-size:clamp(15px,1.4vw,25px);font-weight:900;color:#fff;background:#063A62E8;border:1px solid #ffffff25;border-radius:999px;padding:9px 18px}
+.board{display:grid;gap:10px}.boardTitle{display:flex;justify-content:space-between;align-items:center;color:#D9EDF7;font-weight:900;font-size:clamp(13px,1.1vw,19px)}
+.rows{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.row{--team:#1066AB;position:relative;background:linear-gradient(180deg,color-mix(in srgb,var(--team) 92%,#051B2F),color-mix(in srgb,var(--team) 60%,#041B2E));border:2px solid color-mix(in srgb,var(--team) 75%,white);border-radius:18px;padding:13px 15px;box-shadow:0 12px 24px #00192D55;display:grid;grid-template-columns:auto 1fr;grid-template-areas:"rank name" "rank score" "detail detail";gap:3px 10px;min-height:112px;overflow:hidden}
+.row:nth-child(4n+1){--team:#1066AB}.row:nth-child(4n+2){--team:#F58D27}.row:nth-child(4n+3){--team:#1E9B67}.row:nth-child(4n+4){--team:#8A4BC7}
+.row:after{content:"";position:absolute;width:72px;height:72px;left:-24px;bottom:-30px;background:#ffffff12;transform:rotate(45deg)}
+.rank{grid-area:rank;align-self:center;font-size:clamp(24px,2vw,38px);font-weight:1000;color:#fff;opacity:.8}.name{grid-area:name;font-size:clamp(17px,1.55vw,27px);font-weight:1000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.safe{grid-area:score;font-size:clamp(24px,2.5vw,43px);font-weight:1000;line-height:1}.risk{grid-area:detail;color:#FFE1C2;font-size:clamp(12px,1vw,17px);font-weight:800}
+.empty{grid-column:1/-1;text-align:center;padding:20px;color:#D8EAF3}
+@media(max-width:1150px){.rows{grid-template-columns:repeat(2,1fr)}.row{min-height:95px}.questionPanel{min-height:28vh}.brand{width:150px}.screen{gap:1.5vh}}
+@media(max-width:700px){.top{grid-template-columns:1fr auto}.logoWrap{grid-column:1/-1;grid-row:1}.infoCluster.left{justify-content:flex-end}.brand{width:120px;max-height:10vh}.counter,.timerWrap{padding:8px 11px}.questionFrame{width:92vw}.questionPanel{min-height:26vh;border-width:3px}.rows{grid-template-columns:1fr 1fr;gap:7px}.row{padding:9px}.subline{bottom:-38px}}
+</style>
+</head>
+<body>
+<main class="screen">
+  <header class="top">
+    <div class="infoCluster left"><div id="counter" class="counter">بانتظار الغرفة</div></div>
+    <div class="logoWrap"><img class="brand" src="/brand.webp" alt="الثلاثية الثقافية"></div>
+    <div class="infoCluster"><div id="timerWrap" class="timerWrap"><span class="timerLabel">الوقت</span><span id="timer" class="timer">0</span></div></div>
+  </header>
+  <section class="center">
+    <div class="questionFrame">
+      <div class="questionPanel"><div id="headline" class="headline">بانتظار البداية</div></div>
+      <div id="subline" class="subline"></div>
+    </div>
+  </section>
+  <footer class="board">
+    <div class="boardTitle"><span>الفرق المشاركة</span><span id="count">0 فريق</span></div>
+    <div id="rows" class="rows"></div>
+  </footer>
+</main>
+<script>
+const CODE=(new URLSearchParams(location.search).get('code')||'').toUpperCase();let state=null,offset=0,samples=[];const $=id=>document.getElementById(id),origin=performance.timeOrigin||(Date.now()-performance.now());function nowServer(){return origin+performance.now()+offset}function left(d){return Math.max(0,Math.ceil((Number(d||0)-nowServer())/1000))}function sync(server,t0,t1){const s={rtt:t1-t0,offset:Number(server)-(origin+(t0+t1)/2)};samples.push(s);if(samples.length>16)samples.shift();const best=samples.reduce((a,b)=>b.rtt<a.rtt?b:a,samples[0]);offset=samples.length===1?best.offset:offset*.65+best.offset*.35}function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}function render(){if(!state)return;$('counter').textContent=(state.question_no?'السؤال '+state.question_no+' / '+state.total_questions:state.room_name+' · '+state.room_code);$('headline').textContent=state.headline;$('subline').textContent=state.subline||state.phase_ar||'';$('count').textContent=state.team_count+' فريقًا';const timed=state.phase==='question_open'||state.phase==='storage_open';$('timerWrap').classList.toggle('active',timed);$('timer').textContent=state.phase==='question_open'?left(state.question_deadline_ms):state.phase==='storage_open'?left(state.storage_deadline_ms):0;$('rows').innerHTML=state.leaderboard.map(x=>`<div class="row"><span class="rank">${x.rank}</span><span class="name">${esc(x.name)}</span><span class="safe">${x.vault}</span><span class="risk">الخزنة ${x.vault} · الخطر ${x.risk}</span></div>`).join('')||'<div class="empty">بانتظار انضمام الفرق...</div>'}async function refresh(){try{const t0=performance.now(),r=await fetch('/api/display_state?code='+encodeURIComponent(CODE),{cache:'no-store'}),d=await r.json(),t1=performance.now();if(!r.ok){$('counter').textContent='رمز غير صحيح';$('headline').textContent=d.message||'الغرفة غير موجودة';return}sync(d.server_now_ms,t0,t1);state=d;render()}catch(e){$('counter').textContent='OFFLINE'}}function startStream(){const url='/api/display_stream?code='+encodeURIComponent(CODE),es=new EventSource(url);es.addEventListener('state',e=>{try{const d=JSON.parse(e.data),t=performance.now();sync(d.server_now_ms,t,t);state=d;render()}catch(_){}});es.onerror=()=>{$('counter').textContent=state?(state.room_name+' · إعادة الاتصال…'):'إعادة الاتصال…'}}setInterval(()=>{if(state)render()},50);refresh().then(startStream);setInterval(refresh,30000);
 </script></body></html>
