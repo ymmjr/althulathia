@@ -1,7 +1,7 @@
 {
   "settings": {
     "game_title": "الخزنة",
-    "question_seconds": 10,
+    "question_seconds": 15,
     "storage_seconds": 5,
     "max_multiplier": 128
   },
