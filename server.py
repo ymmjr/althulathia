@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.80"
+VERSION = "Vault Web v0.81"
 
 
 
@@ -112,6 +112,8 @@ class Storage:
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_segment ON question_bank(segment)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_enabled ON question_bank(enabled)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_difficulty ON question_bank(difficulty)")
+                    cur.execute("CREATE TABLE IF NOT EXISTS question_usage (owner_user_id TEXT NOT NULL, segment TEXT NOT NULL, question_id TEXT NOT NULL, room_code TEXT NOT NULL, used_at TEXT NOT NULL, PRIMARY KEY(owner_user_id,segment,question_id))")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_question_usage_owner_segment ON question_usage(owner_user_id,segment)")
                     if self.kind == "sqlite": con.commit()
                 self.last_error = ""
             except Exception as e:
@@ -389,6 +391,136 @@ class Storage:
                     cur.execute("DELETE FROM question_bank WHERE id=?", (str(question_id),))
                     con.commit()
                 return cur.rowcount > 0
+
+    def seed_vault_question_bank(self, questions: list[dict]) -> int:
+        """One-time migration of the legacy Vault questions into the database bank."""
+        existing = self.list_question_bank("vault")
+        existing_text = {normalize_answer(x.get("question_text","")) for x in existing}
+        added = 0
+        for idx, q in enumerate(questions, start=1):
+            question_text = " ".join(str(q.get("question","")).strip().split())
+            if not question_text or normalize_answer(question_text) in existing_text:
+                continue
+            answer = " ".join(str(q.get("correct_answer","")).strip().split())
+            difficulty = int(q.get("difficulty",1) or 1)
+            question_id = f"legacy_vault_{idx:02d}"
+            now = datetime.now().isoformat(timespec="seconds")
+            payload = json.dumps({"correct_answer":answer}, ensure_ascii=False, separators=(",",":"))
+            with self._lock:
+                with self._connect() as con:
+                    cur=con.cursor()
+                    values=(question_id,"vault",question_text,payload,difficulty,1,"system-migration","system-migration",now,now)
+                    if self.kind=="postgres":
+                        cur.execute("INSERT INTO question_bank(id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING",values)
+                    else:
+                        cur.execute("INSERT OR IGNORE INTO question_bank(id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",values); con.commit()
+                    if cur.rowcount>0:
+                        added += 1
+                        existing_text.add(normalize_answer(question_text))
+        return added
+
+    def question_usage_status(self, owner_user_id: str, segment: str = "") -> dict:
+        owner_user_id = str(owner_user_id or "")
+        items = self.list_question_bank(segment)
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if segment:
+                    if self.kind=="postgres":
+                        cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=%s AND segment=%s",(owner_user_id,segment))
+                    else:
+                        cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=? AND segment=?",(owner_user_id,segment))
+                else:
+                    if self.kind=="postgres":
+                        cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=%s",(owner_user_id,))
+                    else:
+                        cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=?",(owner_user_id,))
+                used_ids={str(r[0]) for r in cur.fetchall()}
+        for item in items:
+            item["used_by_you"] = item["id"] in used_ids
+        enabled=[x for x in items if x.get("enabled")]
+        available=[x for x in enabled if not x.get("used_by_you")]
+        by_diff={str(d):sum(1 for x in available if int(x.get("difficulty") or 0)==d) for d in (1,2,3)}
+        used_count=sum(1 for x in items if x.get("used_by_you"))
+        result={
+            "items":items,
+            "total":len(items),
+            "enabled":len(enabled),
+            "used":used_count,
+            "available":len(available),
+            "available_by_difficulty":by_diff,
+        }
+        if segment in {"","vault"}:
+            vault_items=[x for x in (items if segment=="vault" else self.list_question_bank("vault"))]
+            if segment!="vault":
+                with self._lock:
+                    with self._connect() as con:
+                        cur=con.cursor()
+                        if self.kind=="postgres":
+                            cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=%s AND segment=%s",(owner_user_id,"vault"))
+                        else:
+                            cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=? AND segment=?",(owner_user_id,"vault"))
+                        vault_used={str(r[0]) for r in cur.fetchall()}
+                for x in vault_items: x["used_by_you"]=x["id"] in vault_used
+            vault_avail=[x for x in vault_items if x.get("enabled") and not x.get("used_by_you")]
+            counts={d:sum(1 for x in vault_avail if int(x.get("difficulty") or 0)==d) for d in (1,2,3)}
+            result["vault_available_by_difficulty"]={str(k):v for k,v in counts.items()}
+            result["vault_rounds_remaining"]=min(counts[1]//6,counts[2]//4,counts[3]//2)
+        return result
+
+    def reserve_vault_questions(self, owner_user_id: str, room_code: str) -> tuple[bool, str, list[dict]]:
+        owner_user_id = str(owner_user_id or "").strip()
+        if not owner_user_id:
+            return False, "لا يمكن بدء الجولة قبل ربط الغرفة بحساب مسؤول.", []
+        with self._lock:
+            items=self.list_question_bank("vault")
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind=="postgres":
+                    cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=%s AND segment=%s",(owner_user_id,"vault"))
+                else:
+                    cur.execute("SELECT question_id FROM question_usage WHERE owner_user_id=? AND segment=?",(owner_user_id,"vault"))
+                used={str(r[0]) for r in cur.fetchall()}
+                groups={1:[],2:[],3:[]}
+                for item in items:
+                    if item.get("enabled") and item["id"] not in used and int(item.get("difficulty") or 0) in groups:
+                        groups[int(item["difficulty"])].append(item)
+                need={1:6,2:4,3:2}
+                missing={d:max(0,need[d]-len(groups[d])) for d in need}
+                if any(missing.values()):
+                    parts=[]
+                    labels={1:"المستوى 1",2:"المستوى 2",3:"المستوى 3"}
+                    for d in (1,2,3):
+                        if missing[d]: parts.append(f"{missing[d]} من {labels[d]}")
+                    available=f"المتاح الآن: مستوى 1 = {len(groups[1])}، مستوى 2 = {len(groups[2])}، مستوى 3 = {len(groups[3])}"
+                    return False, "لا يمكن بدء الخزنة؛ أضف "+ " و".join(parts) + f". {available}.", []
+                chosen=[]
+                for d in (1,2,3):
+                    random.shuffle(groups[d]); chosen.extend(groups[d][:need[d]])
+                now=datetime.now().isoformat(timespec="seconds")
+                try:
+                    for item in chosen:
+                        values=(owner_user_id,"vault",item["id"],str(room_code),now)
+                        if self.kind=="postgres":
+                            cur.execute("INSERT INTO question_usage(owner_user_id,segment,question_id,room_code,used_at) VALUES (%s,%s,%s,%s,%s)",values)
+                        else:
+                            cur.execute("INSERT INTO question_usage(owner_user_id,segment,question_id,room_code,used_at) VALUES (?,?,?,?,?)",values)
+                    if self.kind=="sqlite": con.commit()
+                except Exception:
+                    if self.kind=="sqlite": con.rollback()
+                    raise
+        game_questions=[]
+        for item in chosen:
+            answer=item.get("answer_data") or {}
+            game_questions.append({
+                "bank_id":item["id"],
+                "question":item["question_text"],
+                "correct_answer":str(answer.get("correct_answer","")),
+                "difficulty":int(item["difficulty"]),
+            })
+        ordered=randomized_question_order(game_questions)
+        for i,q in enumerate(ordered,start=1): q["number"]=i
+        return True, "تم حجز 12 سؤالًا جديدًا من بنك الأسئلة.", ordered
 
     def touch_admin_login(self, user_id: str) -> None:
         now=datetime.now().isoformat(timespec="seconds")
@@ -786,7 +918,7 @@ class GameRoom:
         return int(time.time() * 1000)
 
     def _init_round(self, clear_scores: bool) -> None:
-        self.questions = [dict(q) for q in self.base_questions] if self.room_type == "private" else randomized_question_order(self.base_questions)
+        self.questions = []
         self.phase = "lobby"
         self.game_started = False
         self.joins_open = True
@@ -902,11 +1034,16 @@ class GameRoom:
         with self.lock:
             if self.game_started: return False, "الجولة بدأت بالفعل."
             if not self.teams: return False, "لا يوجد أي فريق داخل الغرفة."
+            ok,msg,questions=self.storage.reserve_vault_questions(self.owner_user_id,self.code)
+            if not ok:
+                return False,msg
+            self.questions=questions
             self.joins_open = False
             self.game_started = True
             self.phase = "ready"
             self._event("SYSTEM", "JOIN_CLOSED", note="إغلاق تلقائي عند بدء الجولة")
-            self._event("SYSTEM", "GAME_STARTED", value=len(self.teams), note="بدأت فقرة الخزنة")
+            self._event("SYSTEM", "GAME_STARTED", value=len(self.teams), note="بدأت فقرة الخزنة من بنك الأسئلة؛ تم حجز 12 سؤالًا غير مستخدم لهذا الحساب")
+            self._changed(team=True,admin=True,display=True)
             return self.start_next()
 
     def _finalize_unsubmitted_from_drafts(self):
@@ -1328,11 +1465,16 @@ class RoomManager:
 
 CONFIG, QUESTIONS = load_data()
 MANAGER = RoomManager(CONFIG, QUESTIONS)
+try:
+    _seeded = MANAGER.storage.seed_vault_question_bank(QUESTIONS)
+    print(f"[QUESTION_BANK] legacy Vault migration added {_seeded} question(s); bank total={len(MANAGER.storage.list_question_bank('vault'))}")
+except Exception as _seed_error:
+    print(f"[QUESTION_BANK] legacy migration failed: {_seed_error}")
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.71"
+    server_version = "VaultWeb/0.81"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1474,14 +1616,15 @@ class Handler(BaseHTTPRequestHandler):
             segment=str(qs.get("segment",[""])[0]).strip()
             if segment and segment not in QUESTION_BANK_SEGMENTS:
                 return self._json(400,{"ok":False,"message":"الفقرة المطلوبة غير صحيحة."})
-            items=MANAGER.storage.list_question_bank(segment)
+            usage=MANAGER.storage.question_usage_status(user["id"],segment)
+            items=usage.pop("items")
             stats={
                 "total":len(items),
                 "enabled":sum(1 for x in items if x.get("enabled")),
                 "disabled":sum(1 for x in items if not x.get("enabled")),
                 "difficulty":{"1":sum(1 for x in items if x.get("difficulty")==1),"2":sum(1 for x in items if x.get("difficulty")==2),"3":sum(1 for x in items if x.get("difficulty")==3)},
             }
-            return self._json(200,{"ok":True,"items":items,"stats":stats,"segments":QUESTION_BANK_SEGMENTS})
+            return self._json(200,{"ok":True,"items":items,"stats":stats,"usage":usage,"segments":QUESTION_BANK_SEGMENTS})
         if path=="/api/admin/question-packs":
             user=self._require_user()
             if not user or user.get("role") not in {"super_admin","assistant_admin"}:
