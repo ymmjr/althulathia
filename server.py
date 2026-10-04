@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.82"
+VERSION = "Vault Web v0.83"
 
 
 
@@ -105,6 +105,10 @@ class Storage:
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_segment ON question_bank(segment)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_enabled ON question_bank(enabled)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_difficulty ON question_bank(difficulty)")
+                    cur.execute("CREATE TABLE IF NOT EXISTS festival_question_bank (id TEXT PRIMARY KEY, festival_round INTEGER NOT NULL, segment TEXT NOT NULL, question_text TEXT NOT NULL, answer_json TEXT NOT NULL, difficulty INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, updated_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_festival_question_round ON festival_question_bank(festival_round)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_festival_question_segment ON festival_question_bank(segment)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_festival_question_enabled ON festival_question_bank(enabled)")
                     cur.execute("CREATE TABLE IF NOT EXISTS question_usage (owner_user_id TEXT NOT NULL, segment TEXT NOT NULL, question_id TEXT NOT NULL, room_code TEXT NOT NULL, used_at TEXT NOT NULL, PRIMARY KEY(owner_user_id,segment,question_id))")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_question_usage_owner_segment ON question_usage(owner_user_id,segment)")
                     cur.execute("DROP TABLE IF EXISTS question_packs")
@@ -254,6 +258,7 @@ class Storage:
         data["difficulty"] = int(data.get("difficulty") or 1)
         data["enabled"] = bool(data.get("enabled"))
         data["segment_label"] = QUESTION_BANK_SEGMENTS.get(data.get("segment"), data.get("segment"))
+        data["scope"] = "general"
         return data
 
     def list_question_bank(self, segment: str = "") -> list[dict]:
@@ -335,6 +340,178 @@ class Storage:
                     cur.execute("DELETE FROM question_bank WHERE id=?", (str(question_id),))
                     con.commit()
                 return cur.rowcount > 0
+
+    def _festival_question_dict(self, row) -> dict | None:
+        if not row:
+            return None
+        keys=("id","festival_round","segment","question_text","answer_json","difficulty","enabled","created_by","updated_by","created_at","updated_at")
+        data=dict(zip(keys,row))
+        try:
+            data["answer_data"]=json.loads(data.pop("answer_json"))
+        except Exception:
+            data["answer_data"]={}
+            data.pop("answer_json",None)
+        data["festival_round"]=int(data.get("festival_round") or 0)
+        data["difficulty"]=int(data.get("difficulty") or 1)
+        data["enabled"]=bool(data.get("enabled"))
+        data["segment_label"]=QUESTION_BANK_SEGMENTS.get(data.get("segment"),data.get("segment"))
+        data["scope"]="festival"
+        return data
+
+    def list_festival_question_bank(self, festival_round: int = 0, segment: str = "") -> list[dict]:
+        festival_round=int(festival_round or 0)
+        segment=str(segment or "").strip()
+        where=[]; params=[]
+        if festival_round>0:
+            where.append("festival_round="+("%s" if self.kind=="postgres" else "?")); params.append(festival_round)
+        if segment:
+            where.append("segment="+("%s" if self.kind=="postgres" else "?")); params.append(segment)
+        sql="SELECT id,festival_round,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM festival_question_bank"
+        if where: sql+=" WHERE "+" AND ".join(where)
+        sql+=" ORDER BY festival_round ASC, updated_at DESC"
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor(); cur.execute(sql,tuple(params)); rows=cur.fetchall()
+        return [self._festival_question_dict(r) for r in rows]
+
+    def get_festival_question_bank_item(self, question_id: str) -> dict | None:
+        row=self._fetchone(
+            "SELECT id,festival_round,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM festival_question_bank WHERE id=%s",
+            "SELECT id,festival_round,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM festival_question_bank WHERE id=?",
+            (str(question_id),),
+        )
+        return self._festival_question_dict(row)
+
+    def create_festival_question_bank_item(self, festival_round: int, segment: str, question_text: str, answer_data: dict, difficulty: int, enabled: bool, user_id: str) -> dict:
+        question_id=uuid.uuid4().hex; now=datetime.now().isoformat(timespec="seconds")
+        answer_json=json.dumps(answer_data,ensure_ascii=False,separators=(",",":"))
+        values=(question_id,int(festival_round),segment,question_text,answer_json,int(difficulty),1 if enabled else 0,user_id,user_id,now,now)
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind=="postgres":
+                    cur.execute("INSERT INTO festival_question_bank(id,festival_round,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",values)
+                else:
+                    cur.execute("INSERT INTO festival_question_bank(id,festival_round,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",values); con.commit()
+        return self.get_festival_question_bank_item(question_id)
+
+    def update_festival_question_bank_item(self, question_id: str, festival_round: int, segment: str, question_text: str, answer_data: dict, difficulty: int, enabled: bool, user_id: str) -> dict | None:
+        now=datetime.now().isoformat(timespec="seconds")
+        answer_json=json.dumps(answer_data,ensure_ascii=False,separators=(",",":"))
+        values=(int(festival_round),segment,question_text,answer_json,int(difficulty),1 if enabled else 0,user_id,now,str(question_id))
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind=="postgres":
+                    cur.execute("UPDATE festival_question_bank SET festival_round=%s,segment=%s,question_text=%s,answer_json=%s,difficulty=%s,enabled=%s,updated_by=%s,updated_at=%s WHERE id=%s",values)
+                else:
+                    cur.execute("UPDATE festival_question_bank SET festival_round=?,segment=?,question_text=?,answer_json=?,difficulty=?,enabled=?,updated_by=?,updated_at=? WHERE id=?",values); con.commit()
+                if cur.rowcount<=0: return None
+        return self.get_festival_question_bank_item(question_id)
+
+    def set_festival_question_bank_enabled(self, question_id: str, enabled: bool, user_id: str) -> dict | None:
+        now=datetime.now().isoformat(timespec="seconds"); values=(1 if enabled else 0,user_id,now,str(question_id))
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind=="postgres":
+                    cur.execute("UPDATE festival_question_bank SET enabled=%s,updated_by=%s,updated_at=%s WHERE id=%s",values)
+                else:
+                    cur.execute("UPDATE festival_question_bank SET enabled=?,updated_by=?,updated_at=? WHERE id=?",values); con.commit()
+                if cur.rowcount<=0: return None
+        return self.get_festival_question_bank_item(question_id)
+
+    def delete_festival_question_bank_item(self, question_id: str) -> bool:
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                if self.kind=="postgres": cur.execute("DELETE FROM festival_question_bank WHERE id=%s",(str(question_id),))
+                else: cur.execute("DELETE FROM festival_question_bank WHERE id=?",(str(question_id),)); con.commit()
+                return cur.rowcount>0
+
+    def question_text_exists(self, scope: str, segment: str, question_text: str, exclude_id: str = "") -> bool:
+        norm=normalize_answer(question_text)
+        items=self.list_festival_question_bank() if scope=="festival" else self.list_question_bank()
+        return any(x.get("segment")==segment and x.get("id")!=exclude_id and normalize_answer(x.get("question_text",""))==norm for x in items)
+
+    def festival_rounds_status(self) -> list[dict]:
+        items=self.list_festival_question_bank()
+        rounds={}
+        for item in items:
+            r=int(item.get("festival_round") or 0)
+            if r<=0: continue
+            entry=rounds.setdefault(r,{"round":r,"total":0,"enabled":0,"segments":{"vault":0,"top_ten":0,"qa":0},"vault_by_difficulty":{"1":0,"2":0,"3":0}})
+            entry["total"]+=1
+            if item.get("enabled"):
+                entry["enabled"]+=1
+                if item.get("segment") in entry["segments"]: entry["segments"][item["segment"]]+=1
+                if item.get("segment")=="vault" and int(item.get("difficulty") or 0) in {1,2,3}:
+                    entry["vault_by_difficulty"][str(int(item["difficulty"]))]+=1
+        result=[]
+        for r in sorted(rounds):
+            e=rounds[r]; c=e["vault_by_difficulty"]
+            e["vault_ready"]=c["1"]>=6 and c["2"]>=4 and c["3"]>=2
+            result.append(e)
+        return result
+
+    def festival_vault_questions(self, festival_round: int) -> tuple[bool,str,list[dict]]:
+        festival_round=int(festival_round or 0)
+        if festival_round<=0: return False,"حدد جولة المهرجان لهذه الغرفة أولًا.",[]
+        items=self.list_festival_question_bank(festival_round,"vault")
+        groups={1:[],2:[],3:[]}
+        for item in items:
+            d=int(item.get("difficulty") or 0)
+            if item.get("enabled") and d in groups: groups[d].append(item)
+        need={1:6,2:4,3:2}
+        missing={d:max(0,need[d]-len(groups[d])) for d in need}
+        if any(missing.values()):
+            parts=[f"{missing[d]} من المستوى {d}" for d in (1,2,3) if missing[d]]
+            return False,f"جولة المهرجان {festival_round} غير مكتملة للخزنة؛ أضف "+" و".join(parts)+".",[]
+        chosen=[]
+        for d in (1,2,3):
+            groups[d].sort(key=lambda x:(str(x.get("created_at","")),str(x.get("id",""))))
+            chosen.extend(groups[d][:need[d]])
+        game=[]
+        for item in chosen:
+            ans=item.get("answer_data") or {}
+            game.append({"bank_id":item["id"],"question":item["question_text"],"correct_answer":str(ans.get("correct_answer","")),"difficulty":int(item["difficulty"])})
+        rng=random.Random(f"festival-vault-{festival_round}")
+        ordered=randomized_question_order(game,rng=rng)
+        for i,q in enumerate(ordered,start=1): q["number"]=i
+        return True,f"تم تحميل أسئلة جولة المهرجان {festival_round}.",ordered
+
+    def bulk_import_questions(self, items: list[dict], user_id: str) -> dict:
+        existing_general={(x["segment"],normalize_answer(x["question_text"])) for x in self.list_question_bank()}
+        existing_festival={(x["segment"],normalize_answer(x["question_text"])) for x in self.list_festival_question_bank()}
+        inserted_general=0; inserted_festival=0; skipped=0
+        now=datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            with self._connect() as con:
+                cur=con.cursor()
+                for item in items:
+                    key=(item["segment"],normalize_answer(item["question_text"]))
+                    scope=item.get("scope","general")
+                    existing=existing_festival if scope=="festival" else existing_general
+                    if key in existing:
+                        skipped+=1; continue
+                    qid=uuid.uuid4().hex
+                    answer_json=json.dumps(item["answer_data"],ensure_ascii=False,separators=(",",":"))
+                    if scope=="festival":
+                        vals=(qid,int(item["festival_round"]),item["segment"],item["question_text"],answer_json,int(item["difficulty"]),1,user_id,user_id,now,now)
+                        if self.kind=="postgres":
+                            cur.execute("INSERT INTO festival_question_bank(id,festival_round,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",vals)
+                        else:
+                            cur.execute("INSERT INTO festival_question_bank(id,festival_round,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",vals)
+                        inserted_festival+=1; existing_festival.add(key)
+                    else:
+                        vals=(qid,item["segment"],item["question_text"],answer_json,int(item["difficulty"]),1,user_id,user_id,now,now)
+                        if self.kind=="postgres":
+                            cur.execute("INSERT INTO question_bank(id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",vals)
+                        else:
+                            cur.execute("INSERT INTO question_bank(id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",vals)
+                        inserted_general+=1; existing_general.add(key)
+                if self.kind=="sqlite": con.commit()
+        return {"general":inserted_general,"festival":inserted_festival,"skipped_duplicates":skipped,"total_inserted":inserted_general+inserted_festival}
 
     def question_usage_status(self, owner_user_id: str, segment: str = "") -> dict:
         owner_user_id = str(owner_user_id or "")
@@ -541,7 +718,8 @@ def load_config() -> dict:
     return config
 
 
-def randomized_question_order(questions: list[dict]) -> list[dict]:
+def randomized_question_order(questions: list[dict], rng=None) -> list[dict]:
+    rng = rng or random
     items = [dict(q) for q in questions]
     hard = [q for q in items if q.get("difficulty") == 3]
     other = [q for q in items if q.get("difficulty") != 3]
@@ -550,8 +728,8 @@ def randomized_question_order(questions: list[dict]) -> list[dict]:
     valid_positions = [p for p in combinations(allowed_positions, len(hard)) if all((b - a) > 1 for a, b in zip(p, p[1:]))]
     if not valid_positions:
         raise ValueError("Cannot place hard questions with current constraints")
-    chosen = set(random.choice(valid_positions))
-    random.shuffle(hard); random.shuffle(other)
+    chosen = set(rng.choice(valid_positions))
+    rng.shuffle(hard); rng.shuffle(other)
     hi, oi = iter(hard), iter(other)
     return [next(hi) if i in chosen else next(oi) for i in range(n)]
 
@@ -588,6 +766,178 @@ def build_event_xlsx(rows: list[list[object]]) -> bytes:
     return bio.getvalue()
 
 
+def build_question_import_template_xlsx() -> bytes:
+    from io import BytesIO
+    from xml.sax.saxutils import escape
+    sheets=[
+        ("الخزنة",["نوع البنك","رقم الجولة","مستوى الصعوبة","السؤال","الإجابة الصحيحة"]),
+        ("أعلى عشرة",["نوع البنك","رقم الجولة","مستوى الصعوبة","السؤال"]+[f"المرتبة {i}" for i in range(1,11)]),
+        ("سؤال وجواب",["نوع البنك","رقم الجولة","مستوى الصعوبة","السؤال","الإجابة الصحيحة"]),
+    ]
+    content_types=['<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">','<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>','<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>']
+    for i in range(1,4): content_types.append(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>')
+    content_types.append("</Types>")
+    workbook='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+''.join(f'<sheet name="{escape(name)}" sheetId="{i}" r:id="rId{i}"/>' for i,(name,_) in enumerate(sheets,1))+'</sheets></workbook>'
+    wb_rels=['<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">']
+    for i in range(1,4): wb_rels.append(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>')
+    wb_rels.append('<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
+    root_rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+    styles='''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Arial"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Arial"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1066AB"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf></cellXfs></styleSheet>'''
+    bio=BytesIO()
+    with zipfile.ZipFile(bio,"w",zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml","".join(content_types)); z.writestr("_rels/.rels",root_rels); z.writestr("xl/workbook.xml",workbook); z.writestr("xl/_rels/workbook.xml.rels","".join(wb_rels)); z.writestr("xl/styles.xml",styles)
+        for idx,(name,headers) in enumerate(sheets,1):
+            last=excel_col(len(headers))
+            cells=''.join(f'<c r="{excel_col(i+1)}1" t="inlineStr" s="1"><is><t>{escape(h)}</t></is></c>' for i,h in enumerate(headers))
+            widths=[]
+            for col in range(1,len(headers)+1):
+                w=14 if col==1 else 13 if col==2 else 16 if col==3 else 42 if col==4 else 22
+                widths.append(f'<col min="{col}" max="{col}" width="{w}" customWidth="1"/>')
+            validation='<dataValidations count="2"><dataValidation type="list" allowBlank="1" sqref="A2:A1000"><formula1>&quot;عام,مهرجان&quot;</formula1></dataValidation><dataValidation type="list" allowBlank="1" sqref="C2:C1000"><formula1>&quot;1,2,3&quot;</formula1></dataValidation></dataValidations>'
+            sheet=f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView rightToLeft="1" workbookViewId="0"/></sheetViews><cols>{''.join(widths)}</cols><sheetData><row r="1" ht="28" customHeight="1">{cells}</row></sheetData><autoFilter ref="A1:{last}1000"/>{validation}</worksheet>'''
+            z.writestr(f"xl/worksheets/sheet{idx}.xml",sheet)
+    return bio.getvalue()
+
+
+def _decode_question_import_file(payload: dict) -> bytes:
+    raw=str(payload.get("file_base64","") or "")
+    if raw.startswith("data:") and "," in raw: raw=raw.split(",",1)[1]
+    if not raw: raise ValueError("اختر ملف Excel أولًا.")
+    if len(raw)>16_000_000: raise ValueError("حجم الملف كبير جدًا.")
+    try: data=base64.b64decode(raw,validate=True)
+    except Exception: raise ValueError("تعذر قراءة ملف Excel.")
+    if len(data)>10_000_000: raise ValueError("حجم الملف يتجاوز الحد المسموح.")
+    return data
+
+
+def parse_question_import_xlsx(data: bytes) -> tuple[list[dict],list[dict]]:
+    from io import BytesIO
+    from xml.etree import ElementTree as ET
+    import posixpath
+    main_ns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel_ns="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    pkg_rel_ns="http://schemas.openxmlformats.org/package/2006/relationships"
+    items=[]; errors=[]
+    def col_index(ref):
+        letters="".join(ch for ch in str(ref) if ch.isalpha()).upper(); n=0
+        for ch in letters: n=n*26+(ord(ch)-64)
+        return max(0,n-1)
+    def norm_sheet(name):
+        return normalize_answer(str(name)).replace("أ","ا").replace("إ","ا").replace("آ","ا")
+    recognized={"الخزنة":"vault","اعلى عشرة":"top_ten","سؤال وجواب":"qa"}
+    try:
+        with zipfile.ZipFile(BytesIO(data),"r") as z:
+            total=sum(x.file_size for x in z.infolist())
+            if total>60_000_000: raise ValueError("ملف Excel غير مقبول لأن حجمه الداخلي كبير جدًا.")
+            names=set(z.namelist())
+            if "xl/workbook.xml" not in names or "xl/_rels/workbook.xml.rels" not in names: raise ValueError("ملف Excel غير صالح.")
+            shared=[]
+            if "xl/sharedStrings.xml" in names:
+                root=ET.fromstring(z.read("xl/sharedStrings.xml"))
+                for si in root.findall(f"{{{main_ns}}}si"):
+                    shared.append("".join(t.text or "" for t in si.iter(f"{{{main_ns}}}t")))
+            relroot=ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+            relmap={r.attrib.get("Id"):r.attrib.get("Target","") for r in relroot.findall(f"{{{pkg_rel_ns}}}Relationship")}
+            wb=ET.fromstring(z.read("xl/workbook.xml"))
+            found=0; total_rows=0
+            for sh in wb.findall(f".//{{{main_ns}}}sheet"):
+                sheet_name=str(sh.attrib.get("name",""))
+                segment=recognized.get(norm_sheet(sheet_name))
+                if not segment: continue
+                found+=1
+                rid=sh.attrib.get(f"{{{rel_ns}}}id"); target=relmap.get(rid,"")
+                if not target: errors.append({"sheet":sheet_name,"row":1,"message":"تعذر قراءة ورقة العمل."}); continue
+                path=target.lstrip("/")
+                if not path.startswith("xl/"): path=posixpath.normpath("xl/"+path)
+                if path not in names: errors.append({"sheet":sheet_name,"row":1,"message":"ملف ورقة العمل غير موجود."}); continue
+                root=ET.fromstring(z.read(path)); rows=[]
+                for row in root.findall(f".//{{{main_ns}}}row"):
+                    rnum=int(row.attrib.get("r") or (len(rows)+1)); vals={}
+                    for cell in row.findall(f"{{{main_ns}}}c"):
+                        idx=col_index(cell.attrib.get("r","")); typ=cell.attrib.get("t","")
+                        val=""
+                        if typ=="inlineStr":
+                            val="".join(t.text or "" for t in cell.iter(f"{{{main_ns}}}t"))
+                        else:
+                            ve=cell.find(f"{{{main_ns}}}v"); raw=ve.text if ve is not None and ve.text is not None else ""
+                            if typ=="s" and raw:
+                                try: val=shared[int(raw)]
+                                except Exception: val=""
+                            else: val=raw
+                        vals[idx]=str(val).strip()
+                    rows.append((rnum,vals))
+                if not rows: errors.append({"sheet":sheet_name,"row":1,"message":"الورقة فارغة."}); continue
+                header_row=next(((rn,v) for rn,v in rows if any(str(x).strip() for x in v.values())),None)
+                if not header_row: continue
+                hr,header_vals=header_row
+                header={str(v).strip():i for i,v in header_vals.items() if str(v).strip()}
+                required=["نوع البنك","رقم الجولة","مستوى الصعوبة","السؤال"]
+                required += [f"المرتبة {i}" for i in range(1,11)] if segment=="top_ten" else ["الإجابة الصحيحة"]
+                missing=[x for x in required if x not in header]
+                if missing:
+                    errors.append({"sheet":sheet_name,"row":hr,"message":"أعمدة ناقصة: "+"، ".join(missing)}); continue
+                for rnum,vals in rows:
+                    if rnum<=hr: continue
+                    get=lambda key: str(vals.get(header[key],"") or "").strip()
+                    raw_values=[get(x) for x in required]
+                    if not any(raw_values): continue
+                    total_rows+=1
+                    if total_rows>10000: raise ValueError("الملف يحتوي على عدد أسئلة أكبر من الحد المسموح.")
+                    bank_raw=normalize_answer(get("نوع البنك")).replace("أ","ا").replace("إ","ا")
+                    if bank_raw in {"عام","العامة","general"}: scope="general"
+                    elif bank_raw in {"مهرجان","مهرجان خاص","خاص","festival"}: scope="festival"
+                    else:
+                        errors.append({"sheet":sheet_name,"row":rnum,"message":"نوع البنك يجب أن يكون «عام» أو «مهرجان»."}); continue
+                    try:
+                        diff=int(float(get("مستوى الصعوبة")))
+                    except Exception:
+                        diff=0
+                    round_no=0
+                    if scope=="festival":
+                        try: round_no=int(float(get("رقم الجولة")))
+                        except Exception: round_no=0
+                        if round_no<=0:
+                            errors.append({"sheet":sheet_name,"row":rnum,"message":"أسئلة المهرجان تحتاج رقم جولة صحيحًا."}); continue
+                    body={"scope":scope,"festival_round":round_no,"segment":segment,"question":get("السؤال"),"difficulty":diff,"enabled":True}
+                    if segment=="top_ten": body["answers"]=[get(f"المرتبة {i}") for i in range(1,11)]
+                    else: body["correct_answer"]=get("الإجابة الصحيحة")
+                    try:
+                        normalized=normalize_question_bank_payload(body)
+                        normalized["source_sheet"]=sheet_name; normalized["source_row"]=rnum
+                        items.append(normalized)
+                    except ValueError as e:
+                        errors.append({"sheet":sheet_name,"row":rnum,"message":str(e)})
+            if found==0: errors.append({"sheet":"—","row":1,"message":"لم يتم العثور على أوراق «الخزنة» أو «أعلى عشرة» أو «سؤال وجواب»."})
+    except zipfile.BadZipFile:
+        raise ValueError("الملف ليس ملف Excel بصيغة xlsx صالحًا.")
+    return items,errors
+
+
+def analyze_question_import(data: bytes, storage: Storage) -> dict:
+    items,errors=parse_question_import_xlsx(data)
+    existing_general={(x["segment"],normalize_answer(x["question_text"])) for x in storage.list_question_bank()}
+    existing_festival={(x["segment"],normalize_answer(x["question_text"])) for x in storage.list_festival_question_bank()}
+    seen=set(); duplicates=[]; importable=[]
+    for item in items:
+        key=(item["scope"],item["segment"],normalize_answer(item["question_text"]))
+        exists=(item["segment"],normalize_answer(item["question_text"])) in (existing_festival if item["scope"]=="festival" else existing_general)
+        if key in seen or exists:
+            duplicates.append({"sheet":item.get("source_sheet",""),"row":item.get("source_row",0),"question":item["question_text"],"scope":item["scope"],"segment":item["segment"]})
+            continue
+        seen.add(key); importable.append(item)
+    by_scope={"general":0,"festival":0}; by_segment={"vault":0,"top_ten":0,"qa":0}; rounds={}
+    for item in importable:
+        by_scope[item["scope"]]+=1; by_segment[item["segment"]]+=1
+        if item["scope"]=="festival":
+            r=str(item["festival_round"]); rounds[r]=rounds.get(r,0)+1
+    return {
+        "importable":importable,
+        "errors":errors,
+        "duplicates":duplicates,
+        "summary":{"valid":len(importable),"errors":len(errors),"duplicates":len(duplicates),"by_scope":by_scope,"by_segment":by_segment,"festival_rounds":rounds},
+    }
+
+
 def normalize_name(s: str) -> str:
     return " ".join(str(s).strip().split()).casefold()
 
@@ -599,6 +949,15 @@ def normalize_answer(s: str) -> str:
 def normalize_question_bank_payload(payload) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("بيانات السؤال غير صحيحة.")
+    scope = str(payload.get("scope", "general")).strip().lower()
+    if scope not in {"general","festival"}:
+        raise ValueError("نوع البنك غير صحيح.")
+    try:
+        festival_round = int(payload.get("festival_round", 0) or 0)
+    except Exception:
+        festival_round = 0
+    if scope=="festival" and festival_round<=0:
+        raise ValueError("حدد رقم جولة المهرجان.")
     segment = str(payload.get("segment", "")).strip()
     if segment not in QUESTION_BANK_SEGMENTS:
         raise ValueError("اختر فقرة صحيحة.")
@@ -635,6 +994,8 @@ def normalize_question_bank_payload(payload) -> dict:
             raise ValueError("إجابات أعلى عشرة يجب أن تكون مختلفة عن بعضها.")
         answer_data = {"answers": cleaned}
     return {
+        "scope": scope,
+        "festival_round": festival_round,
         "segment": segment,
         "question_text": question_text,
         "answer_data": answer_data,
@@ -652,7 +1013,7 @@ class GameRoom:
         "QUESTION_RESOLVED":"اعتماد نتيجة السؤال", "MANUAL_ADD":"إضافة يدوية للخزنة", "MANUAL_DEDUCT":"خصم يدوي من الخزنة", "ROUND_RESET":"إعادة تهيئة الجولة", "GAME_FINISHED":"انتهاء الفقرة", "ROOM_CLOSED":"إغلاق الغرفة", "ROOM_REOPENED":"إعادة فتح الغرفة"
     }
 
-    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None, owner_user_id: str = "", owner_name: str = "", owner_email: str = "", room_type: str = "normal", question_pack_id: str = "", question_pack_label: str = "", question_pack_version: int = 0):
+    def __init__(self, config: dict, questions: list[dict], code: str, name: str, storage: Storage, restored: dict | None = None, owner_user_id: str = "", owner_name: str = "", owner_email: str = "", room_type: str = "normal", festival_round: int = 0, question_pack_id: str = "", question_pack_label: str = "", question_pack_version: int = 0):
         self.cfg = dict(config)
         self.base_questions = [dict(q) for q in questions]
         self.storage = storage
@@ -664,6 +1025,7 @@ class GameRoom:
         self.owner_name = str(owner_name or "")[:120]
         self.owner_email = normalize_email(owner_email)
         self.room_type = "private" if room_type == "private" else "normal"
+        self.festival_round = int(festival_round or 0)
         self.question_pack_id = str(question_pack_id or "")
         self.question_pack_label = str(question_pack_label or "")[:120]
         self.question_pack_version = int(question_pack_version or 0)
@@ -702,6 +1064,7 @@ class GameRoom:
         self.owner_name = str(d.get("owner_name") or self.owner_name or "")[:120]
         self.owner_email = normalize_email(d.get("owner_email") or self.owner_email or "")
         self.room_type = "private" if d.get("room_type") == "private" else "normal"
+        self.festival_round = int(d.get("festival_round", self.festival_round) or 0)
         self.question_pack_id = str(d.get("question_pack_id") or self.question_pack_id or "")
         self.question_pack_label = str(d.get("question_pack_label") or self.question_pack_label or "")[:120]
         self.question_pack_version = int(d.get("question_pack_version", self.question_pack_version) or 0)
@@ -728,7 +1091,7 @@ class GameRoom:
 
     def snapshot(self) -> dict:
         return {
-            "schema": 4, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at, "owner_user_id": self.owner_user_id, "owner_name": self.owner_name, "owner_email": self.owner_email, "room_type": self.room_type, "question_pack_id": self.question_pack_id, "question_pack_label": self.question_pack_label, "question_pack_version": self.question_pack_version, "archived_at": self.archived_at, "closed_at": self.closed_at,
+            "schema": 5, "code": self.code, "name": self.name, "admin_token": self.admin_token, "created_at": self.created_at, "owner_user_id": self.owner_user_id, "owner_name": self.owner_name, "owner_email": self.owner_email, "room_type": self.room_type, "festival_round": self.festival_round, "question_pack_id": self.question_pack_id, "question_pack_label": self.question_pack_label, "question_pack_version": self.question_pack_version, "archived_at": self.archived_at, "closed_at": self.closed_at,
             "closed_joins_open": self.closed_joins_open, "paused_question_remaining_ms": self.paused_question_remaining_ms, "paused_storage_remaining_ms": self.paused_storage_remaining_ms,
             "questions": self.questions, "phase": self.phase, "game_started": self.game_started, "joins_open": self.joins_open, "index": self.index,
             "question_deadline_ms": self.question_deadline_ms, "storage_deadline_ms": self.storage_deadline_ms, "question_token": self.question_token,
@@ -887,7 +1250,10 @@ class GameRoom:
         with self.lock:
             if self.game_started: return False, "الجولة بدأت بالفعل."
             if not self.teams: return False, "لا يوجد أي فريق داخل الغرفة."
-            ok,msg,questions=self.storage.reserve_vault_questions(self.owner_user_id,self.code)
+            if self.room_type=="private":
+                ok,msg,questions=self.storage.festival_vault_questions(self.festival_round)
+            else:
+                ok,msg,questions=self.storage.reserve_vault_questions(self.owner_user_id,self.code)
             if not ok:
                 return False,msg
             self.questions=questions
@@ -895,7 +1261,7 @@ class GameRoom:
             self.game_started = True
             self.phase = "ready"
             self._event("SYSTEM", "JOIN_CLOSED", note="إغلاق تلقائي عند بدء الجولة")
-            self._event("SYSTEM", "GAME_STARTED", value=len(self.teams), note="بدأت فقرة الخزنة من بنك الأسئلة؛ تم حجز 12 سؤالًا غير مستخدم لهذا الحساب")
+            self._event("SYSTEM", "GAME_STARTED", value=len(self.teams), note=("بدأت فقرة الخزنة من بنك المهرجان الخاص" if self.room_type=="private" else "بدأت فقرة الخزنة من البنك العام؛ تم حجز 12 سؤالًا غير مستخدم لهذا الحساب"))
             self._changed(team=True,admin=True,display=True)
             return self.start_next()
 
@@ -1258,14 +1624,14 @@ class RoomManager:
                 code = "".join(secrets.choice(self.ALPHABET) for _ in range(4))
                 if code not in self.rooms: return code
             raise RuntimeError("Unable to generate room code")
-    def create_room(self, name: str, owner_user_id: str = "", owner_name: str = "", owner_email: str = "", room_type: str = "normal"):
+    def create_room(self, name: str, owner_user_id: str = "", owner_name: str = "", owner_email: str = "", room_type: str = "normal", festival_round: int = 0):
         with self.lock:
             room_type = "private" if room_type == "private" else "normal"
             code = self.new_code()
             room = GameRoom(
                 self.cfg, [], code, name, self.storage,
                 owner_user_id=owner_user_id, owner_name=owner_name, owner_email=owner_email,
-                room_type=room_type,
+                room_type=room_type, festival_round=festival_round,
             )
             self.rooms[code] = room
             with room.lock:
@@ -1308,7 +1674,7 @@ class RoomManager:
             rooms=sorted(self.rooms.values(), key=lambda x:x.created_at, reverse=True)
         if user:
             rooms=[r for r in rooms if self.can_access(user,r)]
-        return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"archived_at":r.archived_at,"closed_at":r.closed_at,"is_closed":bool(r.closed_at),"is_archived":bool(r.closed_at or r.archived_at or r.phase=="finished"),"owner_user_id":r.owner_user_id,"owner_name":r.owner_name,"owner_email":r.owner_email,"room_type":r.room_type,"is_private":r.room_type=="private","question_pack_id":r.question_pack_id,"question_pack_label":r.question_pack_label,"question_pack_version":r.question_pack_version,"leaderboard":r.leaderboard(10)} for r in rooms]
+        return [{"code":r.code,"name":r.name,"phase":r.phase,"phase_ar":r.phase_ar(),"joins_open":r.joins_open,"team_count":len(r.teams),"created_at":r.created_at,"archived_at":r.archived_at,"closed_at":r.closed_at,"is_closed":bool(r.closed_at),"is_archived":bool(r.closed_at or r.archived_at or r.phase=="finished"),"owner_user_id":r.owner_user_id,"owner_name":r.owner_name,"owner_email":r.owner_email,"room_type":r.room_type,"is_private":r.room_type=="private","festival_round":r.festival_round,"question_pack_id":r.question_pack_id,"question_pack_label":r.question_pack_label,"question_pack_version":r.question_pack_version,"leaderboard":r.leaderboard(10)} for r in rooms]
 
 
 CONFIG = load_config()
@@ -1317,7 +1683,7 @@ MANAGER = RoomManager(CONFIG)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VaultWeb/0.82"
+    server_version = "VaultWeb/0.83"
     def log_message(self, fmt, *args): print(f"[{datetime.now():%H:%M:%S}] {self.client_address[0]} - {fmt % args}")
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1451,23 +1817,35 @@ class Handler(BaseHTTPRequestHandler):
                 x["email_verified"]=email_auth.is_verified(MANAGER.storage,x)
             pending=sum(1 for x in users if x.get("status")=="pending" and x.get("email_verified"))
             return self._json(200,{"ok":True,"users":users,"pending_count":pending})
+        if path=="/api/admin/questions/template.xlsx":
+            user=self._require_content_admin()
+            if not user: return self._json(403,{"ok":False,"message":"بنك الأسئلة متاح للمسؤول الرئيسي والمسؤول المساعد فقط."})
+            body=build_question_import_template_xlsx()
+            return self._send(200,body,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",{"Content-Disposition":'attachment; filename="althulathia_questions_template.xlsx"'})
+        if path=="/api/admin/festival-rounds":
+            user=self._require_content_admin()
+            if not user: return self._json(403,{"ok":False,"message":"غير مصرح."})
+            return self._json(200,{"ok":True,"rounds":MANAGER.storage.festival_rounds_status()})
         if path=="/api/admin/questions":
             user=self._require_content_admin()
             if not user:
                 return self._json(403,{"ok":False,"message":"بنك الأسئلة متاح للمسؤول الرئيسي والمسؤول المساعد فقط."})
             qs=parse_qs(u.query)
+            scope=str(qs.get("scope",["general"])[0]).strip().lower()
             segment=str(qs.get("segment",[""])[0]).strip()
+            try: festival_round=int(qs.get("round",["0"])[0] or 0)
+            except Exception: festival_round=0
+            if scope not in {"general","festival"}:
+                return self._json(400,{"ok":False,"message":"نوع البنك غير صحيح."})
             if segment and segment not in QUESTION_BANK_SEGMENTS:
                 return self._json(400,{"ok":False,"message":"الفقرة المطلوبة غير صحيحة."})
+            if scope=="festival":
+                items=MANAGER.storage.list_festival_question_bank(festival_round,segment)
+                rounds=MANAGER.storage.festival_rounds_status()
+                return self._json(200,{"ok":True,"scope":"festival","items":items,"rounds":rounds,"segments":QUESTION_BANK_SEGMENTS})
             usage=MANAGER.storage.question_usage_status(user["id"],segment)
             items=usage.pop("items")
-            stats={
-                "total":len(items),
-                "enabled":sum(1 for x in items if x.get("enabled")),
-                "disabled":sum(1 for x in items if not x.get("enabled")),
-                "difficulty":{"1":sum(1 for x in items if x.get("difficulty")==1),"2":sum(1 for x in items if x.get("difficulty")==2),"3":sum(1 for x in items if x.get("difficulty")==3)},
-            }
-            return self._json(200,{"ok":True,"items":items,"stats":stats,"usage":usage,"segments":QUESTION_BANK_SEGMENTS})
+            return self._json(200,{"ok":True,"scope":"general","items":items,"usage":usage,"segments":QUESTION_BANK_SEGMENTS})
         if path=="/api/team/stream":
             room,_=self._room_from(u); team=self._team_auth(room,u)
             if not room: return self._json(404,{"ok":False,"message":"الغرفة غير موجودة."})
@@ -1681,24 +2059,53 @@ class Handler(BaseHTTPRequestHandler):
             user=self._require_content_admin()
             if not user:
                 return self._json(403,{"ok":False,"message":"بنك الأسئلة متاح للمسؤول الرئيسي والمسؤول المساعد فقط."})
+            if path in {"/api/admin/questions/import-preview","/api/admin/questions/import-commit"}:
+                try:
+                    data=_decode_question_import_file(p)
+                    analysis=analyze_question_import(data,MANAGER.storage)
+                    summary=analysis["summary"]
+                    if path=="/api/admin/questions/import-preview":
+                        return self._json(200,{"ok":True,"message":"تم فحص الملف.","summary":summary,"errors":analysis["errors"][:100],"duplicates":analysis["duplicates"][:100]})
+                    if analysis["errors"]:
+                        return self._json(400,{"ok":False,"message":"لا يمكن الاستيراد قبل تصحيح أخطاء الملف.","summary":summary,"errors":analysis["errors"][:100]})
+                    result=MANAGER.storage.bulk_import_questions(analysis["importable"],user["id"])
+                    return self._json(200,{"ok":True,"message":f"تم استيراد {result['total_inserted']} سؤالًا بنجاح.","result":result,"summary":summary})
+                except ValueError as e:
+                    return self._json(400,{"ok":False,"message":str(e)})
+                except Exception as e:
+                    print(f"[QUESTION_IMPORT] failed: {e}")
+                    return self._json(500,{"ok":False,"message":"تعذر معالجة ملف Excel."})
+            scope=str(p.get("scope","general")).strip().lower()
+            if scope not in {"general","festival"}:
+                return self._json(400,{"ok":False,"message":"نوع البنك غير صحيح."})
             if path=="/api/admin/questions/create":
                 try:
                     data=normalize_question_bank_payload(p)
-                    item=MANAGER.storage.create_question_bank_item(data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
-                    return self._json(200,{"ok":True,"message":"تمت إضافة السؤال إلى بنك الأسئلة.","item":item})
+                    if MANAGER.storage.question_text_exists(data["scope"],data["segment"],data["question_text"]):
+                        return self._json(409,{"ok":False,"message":"هذا السؤال موجود مسبقًا في نفس البنك."})
+                    if data["scope"]=="festival":
+                        item=MANAGER.storage.create_festival_question_bank_item(data["festival_round"],data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
+                    else:
+                        item=MANAGER.storage.create_question_bank_item(data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
+                    return self._json(200,{"ok":True,"message":"تمت إضافة السؤال.","item":item})
                 except ValueError as e:
                     return self._json(400,{"ok":False,"message":str(e)})
                 except Exception as e:
                     print(f"[QUESTION_BANK] create failed: {e}")
                     return self._json(500,{"ok":False,"message":"تعذر حفظ السؤال."})
             question_id=str(p.get("question_id","")).strip()
-            current=MANAGER.storage.get_question_bank_item(question_id)
+            current=MANAGER.storage.get_festival_question_bank_item(question_id) if scope=="festival" else MANAGER.storage.get_question_bank_item(question_id)
             if not current:
                 return self._json(404,{"ok":False,"message":"السؤال غير موجود."})
             if path=="/api/admin/questions/update":
                 try:
                     data=normalize_question_bank_payload(p)
-                    item=MANAGER.storage.update_question_bank_item(question_id,data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
+                    if MANAGER.storage.question_text_exists(data["scope"],data["segment"],data["question_text"],exclude_id=question_id):
+                        return self._json(409,{"ok":False,"message":"يوجد سؤال آخر بنفس النص في هذا البنك."})
+                    if scope=="festival":
+                        item=MANAGER.storage.update_festival_question_bank_item(question_id,data["festival_round"],data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
+                    else:
+                        item=MANAGER.storage.update_question_bank_item(question_id,data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
                     return self._json(200,{"ok":True,"message":"تم تحديث السؤال.","item":item})
                 except ValueError as e:
                     return self._json(400,{"ok":False,"message":str(e)})
@@ -1706,11 +2113,11 @@ class Handler(BaseHTTPRequestHandler):
                     print(f"[QUESTION_BANK] update failed for {question_id}: {e}")
                     return self._json(500,{"ok":False,"message":"تعذر تحديث السؤال."})
             if path=="/api/admin/questions/toggle":
-                item=MANAGER.storage.set_question_bank_enabled(question_id,bool(p.get("enabled")),user["id"])
+                item=MANAGER.storage.set_festival_question_bank_enabled(question_id,bool(p.get("enabled")),user["id"]) if scope=="festival" else MANAGER.storage.set_question_bank_enabled(question_id,bool(p.get("enabled")),user["id"])
                 return self._json(200,{"ok":True,"message":"تم تفعيل السؤال." if item and item.get("enabled") else "تم تعطيل السؤال.","item":item})
             if path=="/api/admin/questions/delete":
-                deleted=MANAGER.storage.delete_question_bank_item(question_id)
-                return self._json(200 if deleted else 404,{"ok":bool(deleted),"message":"تم حذف السؤال من بنك الأسئلة." if deleted else "السؤال غير موجود."})
+                deleted=MANAGER.storage.delete_festival_question_bank_item(question_id) if scope=="festival" else MANAGER.storage.delete_question_bank_item(question_id)
+                return self._json(200 if deleted else 404,{"ok":bool(deleted),"message":"تم حذف السؤال." if deleted else "السؤال غير موجود."})
             return self._send(404,b"Not found")
         if path=="/api/admin/create_room":
             user=self._require_user()
@@ -1719,12 +2126,19 @@ class Handler(BaseHTTPRequestHandler):
             room_type="private" if str(p.get("room_type","normal"))=="private" else "normal"
             if room_type=="private" and user.get("role") not in {"super_admin","assistant_admin"}:
                 return self._json(403,{"ok":False,"message":"إنشاء غرف المهرجان الخاصة متاح للمسؤول الرئيسي والمسؤول المساعد فقط."})
+            festival_round=0
+            if room_type=="private":
+                try: festival_round=int(p.get("festival_round",0) or 0)
+                except Exception: festival_round=0
+                available={int(x["round"]) for x in MANAGER.storage.festival_rounds_status()}
+                if festival_round<=0 or festival_round not in available:
+                    return self._json(400,{"ok":False,"message":"اختر جولة مهرجان موجودة في بنك المهرجان."})
             room=MANAGER.create_room(
                 str(p.get("room_name","")).strip() or ("غرفة مهرجان خاصة" if room_type=="private" else "غرفة الخزنة"),
                 owner_user_id=user["id"], owner_name=user.get("name",""), owner_email=user.get("email",""),
-                room_type=room_type,
+                room_type=room_type, festival_round=festival_round,
             )
-            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة. سيتم حجز أسئلتها من بنك الأسئلة عند بدء الخزنة.","room":{"code":room.code,"name":room.name,"room_type":room.room_type,"admin_url":f"/admin/room?code={room.code}","display_url":f"/display?code={room.code}"}})
+            return self._json(200,{"ok":True,"message":"تم إنشاء الغرفة الخاصة وربطها بجولة المهرجان." if room_type=="private" else "تم إنشاء الغرفة. سيتم حجز أسئلتها من البنك العام عند بدء الخزنة.","room":{"code":room.code,"name":room.name,"room_type":room.room_type,"festival_round":room.festival_round,"admin_url":f"/admin/room?code={room.code}","display_url":f"/display?code={room.code}"}})
         if path=="/api/admin/check_pin":
             ok=(not MANAGER.storage.superadmin_exists()) and self._master_pin_ok(p,u); return self._json(200 if ok else 403,{"ok":ok,"message":"الرمز صالح للتهيئة الأولى." if ok else "الرمز غير صالح أو تم إنشاء المسؤول الرئيسي مسبقًا."})
 
