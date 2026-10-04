@@ -27,7 +27,7 @@ WEB = ROOT / "web"
 QUESTIONS_PATH = ROOT / "Questions.json"
 LOG_DIR = Path(os.environ.get("VAULT_LOG_DIR", str(ROOT / "Logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-VERSION = "Vault Web v0.71"
+VERSION = "Vault Web v0.80"
 
 
 
@@ -39,6 +39,11 @@ FESTIVAL_PACK_SLOTS = (
 )
 FESTIVAL_PACK_LABELS = {x["id"]: x["label"] for x in FESTIVAL_PACK_SLOTS}
 ADMIN_ROLES = {"super_admin", "assistant_admin", "supervisor"}
+QUESTION_BANK_SEGMENTS = {
+    "vault": "الخزنة",
+    "top_ten": "أعلى عشرة",
+    "qa": "سؤال وجواب",
+}
 
 def normalize_email(value: str) -> str:
     return str(value or "").strip().lower()[:254]
@@ -103,6 +108,10 @@ class Storage:
                     cur.execute("CREATE TABLE IF NOT EXISTS admin_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at BIGINT NOT NULL)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id)")
                     cur.execute("CREATE TABLE IF NOT EXISTS question_packs (slot_id TEXT PRIMARY KEY, label TEXT NOT NULL, version INTEGER NOT NULL, questions_json TEXT NOT NULL, source_name TEXT, uploaded_at TEXT NOT NULL, uploaded_by TEXT NOT NULL, checksum TEXT NOT NULL)")
+                    cur.execute("CREATE TABLE IF NOT EXISTS question_bank (id TEXT PRIMARY KEY, segment TEXT NOT NULL, question_text TEXT NOT NULL, answer_json TEXT NOT NULL, difficulty INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, updated_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_segment ON question_bank(segment)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_enabled ON question_bank(enabled)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_question_bank_difficulty ON question_bank(difficulty)")
                     if self.kind == "sqlite": con.commit()
                 self.last_error = ""
             except Exception as e:
@@ -285,6 +294,101 @@ class Storage:
                     )
                     con.commit()
         return self.get_question_pack(slot_id)
+
+    def _question_bank_dict(self, row) -> dict | None:
+        if not row:
+            return None
+        keys = ("id","segment","question_text","answer_json","difficulty","enabled","created_by","updated_by","created_at","updated_at")
+        data = dict(zip(keys, row))
+        try:
+            data["answer_data"] = json.loads(data.pop("answer_json"))
+        except Exception:
+            data["answer_data"] = {}
+            data.pop("answer_json", None)
+        data["difficulty"] = int(data.get("difficulty") or 1)
+        data["enabled"] = bool(data.get("enabled"))
+        data["segment_label"] = QUESTION_BANK_SEGMENTS.get(data.get("segment"), data.get("segment"))
+        return data
+
+    def list_question_bank(self, segment: str = "") -> list[dict]:
+        segment = str(segment or "").strip()
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                if segment:
+                    if self.kind == "postgres":
+                        cur.execute("SELECT id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM question_bank WHERE segment=%s ORDER BY updated_at DESC", (segment,))
+                    else:
+                        cur.execute("SELECT id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM question_bank WHERE segment=? ORDER BY updated_at DESC", (segment,))
+                else:
+                    cur.execute("SELECT id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM question_bank ORDER BY updated_at DESC")
+                rows = cur.fetchall()
+        return [self._question_bank_dict(row) for row in rows]
+
+    def get_question_bank_item(self, question_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM question_bank WHERE id=%s",
+            "SELECT id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at FROM question_bank WHERE id=?",
+            (str(question_id),),
+        )
+        return self._question_bank_dict(row)
+
+    def create_question_bank_item(self, segment: str, question_text: str, answer_data: dict, difficulty: int, enabled: bool, user_id: str) -> dict:
+        question_id = uuid.uuid4().hex
+        now = datetime.now().isoformat(timespec="seconds")
+        answer_json = json.dumps(answer_data, ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                values = (question_id, segment, question_text, answer_json, int(difficulty), 1 if enabled else 0, user_id, user_id, now, now)
+                if self.kind == "postgres":
+                    cur.execute("INSERT INTO question_bank(id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", values)
+                else:
+                    cur.execute("INSERT INTO question_bank(id,segment,question_text,answer_json,difficulty,enabled,created_by,updated_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", values)
+                    con.commit()
+        return self.get_question_bank_item(question_id)
+
+    def update_question_bank_item(self, question_id: str, segment: str, question_text: str, answer_data: dict, difficulty: int, enabled: bool, user_id: str) -> dict | None:
+        now = datetime.now().isoformat(timespec="seconds")
+        answer_json = json.dumps(answer_data, ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                values = (segment, question_text, answer_json, int(difficulty), 1 if enabled else 0, user_id, now, str(question_id))
+                if self.kind == "postgres":
+                    cur.execute("UPDATE question_bank SET segment=%s,question_text=%s,answer_json=%s,difficulty=%s,enabled=%s,updated_by=%s,updated_at=%s WHERE id=%s", values)
+                else:
+                    cur.execute("UPDATE question_bank SET segment=?,question_text=?,answer_json=?,difficulty=?,enabled=?,updated_by=?,updated_at=? WHERE id=?", values)
+                    con.commit()
+                if cur.rowcount <= 0:
+                    return None
+        return self.get_question_bank_item(question_id)
+
+    def set_question_bank_enabled(self, question_id: str, enabled: bool, user_id: str) -> dict | None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                values = (1 if enabled else 0, user_id, now, str(question_id))
+                if self.kind == "postgres":
+                    cur.execute("UPDATE question_bank SET enabled=%s,updated_by=%s,updated_at=%s WHERE id=%s", values)
+                else:
+                    cur.execute("UPDATE question_bank SET enabled=?,updated_by=?,updated_at=? WHERE id=?", values)
+                    con.commit()
+                if cur.rowcount <= 0:
+                    return None
+        return self.get_question_bank_item(question_id)
+
+    def delete_question_bank_item(self, question_id: str) -> bool:
+        with self._lock:
+            with self._connect() as con:
+                cur = con.cursor()
+                if self.kind == "postgres":
+                    cur.execute("DELETE FROM question_bank WHERE id=%s", (str(question_id),))
+                else:
+                    cur.execute("DELETE FROM question_bank WHERE id=?", (str(question_id),))
+                    con.commit()
+                return cur.rowcount > 0
 
     def touch_admin_login(self, user_id: str) -> None:
         now=datetime.now().isoformat(timespec="seconds")
@@ -505,6 +609,53 @@ def normalize_question_pack_payload(payload) -> list[dict]:
             "difficulty": difficulty,
         })
     return questions
+
+
+def normalize_question_bank_payload(payload) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("بيانات السؤال غير صحيحة.")
+    segment = str(payload.get("segment", "")).strip()
+    if segment not in QUESTION_BANK_SEGMENTS:
+        raise ValueError("اختر فقرة صحيحة.")
+    question_text = " ".join(str(payload.get("question", "")).strip().split())
+    if not question_text:
+        raise ValueError("اكتب نص السؤال.")
+    if len(question_text) > 1200:
+        raise ValueError("نص السؤال طويل جدًا.")
+    try:
+        difficulty = int(payload.get("difficulty", 1))
+    except Exception:
+        difficulty = 0
+    if difficulty not in {1, 2, 3}:
+        raise ValueError("مستوى الصعوبة يجب أن يكون من 1 إلى 3.")
+    enabled = bool(payload.get("enabled", True))
+    if segment in {"vault", "qa"}:
+        correct_answer = " ".join(str(payload.get("correct_answer", "")).strip().split())
+        if not correct_answer:
+            raise ValueError("اكتب الإجابة الصحيحة.")
+        if len(correct_answer) > 1200:
+            raise ValueError("الإجابة الصحيحة طويلة جدًا.")
+        answer_data = {"correct_answer": correct_answer}
+    else:
+        answers = payload.get("answers")
+        if not isinstance(answers, list) or len(answers) != 10:
+            raise ValueError("فقرة أعلى عشرة تحتاج إلى 10 إجابات مرتبة.")
+        cleaned = [" ".join(str(x or "").strip().split()) for x in answers]
+        if any(not x for x in cleaned):
+            raise ValueError("أكمل الإجابات العشر كلها.")
+        if any(len(x) > 500 for x in cleaned):
+            raise ValueError("إحدى إجابات أعلى عشرة طويلة جدًا.")
+        normalized = [normalize_answer(x) for x in cleaned]
+        if len(set(normalized)) != 10:
+            raise ValueError("إجابات أعلى عشرة يجب أن تكون مختلفة عن بعضها.")
+        answer_data = {"answers": cleaned}
+    return {
+        "segment": segment,
+        "question_text": question_text,
+        "answer_data": answer_data,
+        "difficulty": difficulty,
+        "enabled": enabled,
+    }
 
 
 class GameRoom:
@@ -1274,12 +1425,15 @@ class Handler(BaseHTTPRequestHandler):
     def _require_superadmin(self):
         user=self._require_user()
         return user if user and user.get("role")=="super_admin" else None
+    def _require_content_admin(self):
+        user=self._require_user()
+        return user if user and user.get("role") in {"super_admin","assistant_admin"} else None
 
     def do_GET(self):
         u=urlparse(self.path); path=u.path
         if path=="/": return self._page("index.html", {"__VERSION__":VERSION})
         if path=="/admin": return self._page("admin_home.html", {"__VERSION__":VERSION})
-        if path in {"/admin/dashboard","/admin/rooms","/admin/accounts","/admin/archive","/admin/settings"}: return self._page("admin_portal.html", {"__VERSION__":VERSION})
+        if path in {"/admin/dashboard","/admin/rooms","/admin/questions","/admin/accounts","/admin/archive","/admin/settings"}: return self._page("admin_portal.html", {"__VERSION__":VERSION})
         if path in {"/archive","/admin/archive/room"}: return self._page("archive.html", {"__VERSION__":VERSION})
         if path=="/brand.svg":
             body=(WEB/"brand.svg").read_bytes(); return self._send(200,body,"image/svg+xml; charset=utf-8")
@@ -1312,6 +1466,22 @@ class Handler(BaseHTTPRequestHandler):
                 x["email_verified"]=email_auth.is_verified(MANAGER.storage,x)
             pending=sum(1 for x in users if x.get("status")=="pending" and x.get("email_verified"))
             return self._json(200,{"ok":True,"users":users,"pending_count":pending})
+        if path=="/api/admin/questions":
+            user=self._require_content_admin()
+            if not user:
+                return self._json(403,{"ok":False,"message":"بنك الأسئلة متاح للمسؤول الرئيسي والمسؤول المساعد فقط."})
+            qs=parse_qs(u.query)
+            segment=str(qs.get("segment",[""])[0]).strip()
+            if segment and segment not in QUESTION_BANK_SEGMENTS:
+                return self._json(400,{"ok":False,"message":"الفقرة المطلوبة غير صحيحة."})
+            items=MANAGER.storage.list_question_bank(segment)
+            stats={
+                "total":len(items),
+                "enabled":sum(1 for x in items if x.get("enabled")),
+                "disabled":sum(1 for x in items if not x.get("enabled")),
+                "difficulty":{"1":sum(1 for x in items if x.get("difficulty")==1),"2":sum(1 for x in items if x.get("difficulty")==2),"3":sum(1 for x in items if x.get("difficulty")==3)},
+            }
+            return self._json(200,{"ok":True,"items":items,"stats":stats,"segments":QUESTION_BANK_SEGMENTS})
         if path=="/api/admin/question-packs":
             user=self._require_user()
             if not user or user.get("role") not in {"super_admin","assistant_admin"}:
@@ -1535,6 +1705,41 @@ class Handler(BaseHTTPRequestHandler):
             data={"ok":ok,"message":msg}
             if ok and team: data.update({"room_code":room.code,"room_name":room.name,"team_id":team["id"],"team_name":team["name"],"team_token":team["token"],"team_url":f"/team?code={room.code}&token={team['token']}"})
             return self._json(200 if ok else 409,data)
+        if path.startswith("/api/admin/questions/"):
+            user=self._require_content_admin()
+            if not user:
+                return self._json(403,{"ok":False,"message":"بنك الأسئلة متاح للمسؤول الرئيسي والمسؤول المساعد فقط."})
+            if path=="/api/admin/questions/create":
+                try:
+                    data=normalize_question_bank_payload(p)
+                    item=MANAGER.storage.create_question_bank_item(data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
+                    return self._json(200,{"ok":True,"message":"تمت إضافة السؤال إلى بنك الأسئلة.","item":item})
+                except ValueError as e:
+                    return self._json(400,{"ok":False,"message":str(e)})
+                except Exception as e:
+                    print(f"[QUESTION_BANK] create failed: {e}")
+                    return self._json(500,{"ok":False,"message":"تعذر حفظ السؤال."})
+            question_id=str(p.get("question_id","")).strip()
+            current=MANAGER.storage.get_question_bank_item(question_id)
+            if not current:
+                return self._json(404,{"ok":False,"message":"السؤال غير موجود."})
+            if path=="/api/admin/questions/update":
+                try:
+                    data=normalize_question_bank_payload(p)
+                    item=MANAGER.storage.update_question_bank_item(question_id,data["segment"],data["question_text"],data["answer_data"],data["difficulty"],data["enabled"],user["id"])
+                    return self._json(200,{"ok":True,"message":"تم تحديث السؤال.","item":item})
+                except ValueError as e:
+                    return self._json(400,{"ok":False,"message":str(e)})
+                except Exception as e:
+                    print(f"[QUESTION_BANK] update failed for {question_id}: {e}")
+                    return self._json(500,{"ok":False,"message":"تعذر تحديث السؤال."})
+            if path=="/api/admin/questions/toggle":
+                item=MANAGER.storage.set_question_bank_enabled(question_id,bool(p.get("enabled")),user["id"])
+                return self._json(200,{"ok":True,"message":"تم تفعيل السؤال." if item and item.get("enabled") else "تم تعطيل السؤال.","item":item})
+            if path=="/api/admin/questions/delete":
+                deleted=MANAGER.storage.delete_question_bank_item(question_id)
+                return self._json(200 if deleted else 404,{"ok":bool(deleted),"message":"تم حذف السؤال من بنك الأسئلة." if deleted else "السؤال غير موجود."})
+            return self._send(404,b"Not found")
         if path=="/api/admin/question-packs/upload":
             user=self._require_superadmin()
             if not user:
